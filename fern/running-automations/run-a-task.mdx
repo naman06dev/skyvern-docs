@@ -1,0 +1,447 @@
+---
+title: Run a Task
+subtitle: Execute a single browser automation with natural language
+slug: running-automations/run-a-task
+---
+
+A **Task** is the simplest way to automate a browser action. You describe what you want in natural language, and Skyvern's AI navigates the web to complete it.
+
+```python
+result = await client.run_task(
+    prompt="Get the title of the top post on Hacker News",
+    url="https://news.ycombinator.com"
+)
+```
+
+---
+
+## When to use Tasks vs Workflows
+
+| Scenario | Use |
+|----------|-----|
+| One-off automation, quick data extraction | **Task** |
+| Experimenting or prototyping | **Task** |
+| Multi-step process with branching logic | **Workflow** |
+| Reusable automation shared across your team | **Workflow** |
+| Automation with loops, conditionals, or chained steps | **Workflow** |
+
+Use Workflows to chain multiple steps together—they can be saved, versioned, and reused.
+
+---
+
+## Run a task
+
+A task requires two parameters:
+
+- **`prompt`** — Natural language instructions describing what the AI should do
+- **`url`** — The starting page for the automation
+
+For additional parameters like engines, proxies, and extraction schemas, see [Task Parameters](/running-automations/task-parameters).
+
+When you call `run_task`, Skyvern spins up a cloud browser, navigates to the URL, and executes your prompt. A typical task takes 30–90 seconds depending on complexity.
+
+<CodeGroup>
+```python Python
+import os
+import asyncio
+from skyvern import Skyvern
+
+async def main():
+    client = Skyvern(api_key=os.getenv("SKYVERN_API_KEY"))
+
+    result = await client.run_task(
+        prompt="Get the title of the top post",
+        url="https://news.ycombinator.com",
+    )
+
+    print(f"Run ID: {result.run_id}")
+    print(f"Status: {result.status}")
+
+asyncio.run(main())
+```
+
+```typescript TypeScript
+import { SkyvernClient } from "@skyvern/client";
+
+async function main() {
+  const client = new SkyvernClient({
+    apiKey: process.env.SKYVERN_API_KEY,
+  });
+
+  const result = await client.runTask({
+    body: {
+      prompt: "Get the title of the top post",
+      url: "https://news.ycombinator.com",
+    },
+  });
+
+  console.log(`Run ID: ${result.runId}`);
+  console.log(`Status: ${result.status}`);
+}
+
+main();
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Get the title of the top post",
+    "url": "https://news.ycombinator.com"
+  }'
+```
+</CodeGroup>
+
+The response includes a `run_id`—a unique identifier for this task execution (e.g., `tsk_v2_484019301257171242`). Use this ID to check status, fetch results, and retrieve artifacts.
+
+---
+
+## Get results
+
+The `run_task` call queues the task and returns immediately. Use the `run_id` to fetch results once the task reaches a terminal state.
+
+| Status | Description |
+|--------|-------------|
+| `created` | Task initialized, not yet queued |
+| `queued` | Waiting for an available browser |
+| `running` | AI is navigating and executing |
+| `completed` | Task finished successfully—check `output` for results |
+| `failed` | Task encountered an error—check `failure_reason` and retry or adjust your prompt |
+| `terminated` | Task was manually stopped |
+| `timed_out` | Task exceeded time limit—increase `max_steps` or simplify the task |
+| `canceled` | Task was cancelled before starting |
+
+You have three options for retrieving results: poll `get_run`, set up a webhook, or use `wait_for_completion`.
+
+### Option 1: Polling
+
+Poll `get_run` until status is terminal (`completed`, `failed`, `terminated`, `timed_out`, or `canceled`).
+
+<CodeGroup>
+```python Python
+import os
+import asyncio
+from skyvern import Skyvern
+
+async def main():
+    client = Skyvern(api_key=os.getenv("SKYVERN_API_KEY"))
+
+    result = await client.run_task(
+        prompt="Get the title of the top post",
+        url="https://news.ycombinator.com",
+    )
+
+    run_id = result.run_id
+
+    while True:
+        run = await client.get_run(run_id)
+
+        if run.status in ["completed", "failed", "terminated", "timed_out", "canceled"]:
+            break
+
+        await asyncio.sleep(5)
+
+    print(f"Output: {run.output}")
+
+asyncio.run(main())
+```
+
+```typescript TypeScript
+import { SkyvernClient } from "@skyvern/client";
+
+async function main() {
+  const client = new SkyvernClient({
+    apiKey: process.env.SKYVERN_API_KEY,
+  });
+
+  const result = await client.runTask({
+    body: {
+      prompt: "Get the title of the top post",
+      url: "https://news.ycombinator.com",
+    },
+  });
+
+  const runId = result.runId;
+
+  while (true) {
+    const run = await client.getRun(runId);
+
+    if (["completed", "failed", "terminated", "timed_out", "canceled"].includes(run.status)) {
+      console.log(`Output: ${JSON.stringify(run.output)}`);
+      break;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
+}
+
+main();
+```
+
+```bash cURL
+#!/bin/bash
+RUN_ID="YOUR_RUN_ID"
+
+while true; do
+  RESPONSE=$(curl -s -X GET "https://api.skyvern.com/v1/runs/$RUN_ID" \
+    -H "x-api-key: $SKYVERN_API_KEY")
+
+  STATUS=$(echo "$RESPONSE" | jq -r '.status')
+  echo "Status: $STATUS"
+
+  if [[ "$STATUS" == "completed" || "$STATUS" == "failed" || "$STATUS" == "terminated" || "$STATUS" == "timed_out" || "$STATUS" == "canceled" ]]; then
+    echo "$RESPONSE" | jq '.output'
+    break
+  fi
+
+  sleep 5
+done
+```
+</CodeGroup>
+
+### Option 2: Webhooks
+
+Pass a `webhook_url` when creating the task.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Get the title of the top post",
+    url="https://news.ycombinator.com",
+    webhook_url="https://your-server.com/webhook",
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Get the title of the top post",
+    url: "https://news.ycombinator.com",
+    webhookUrl: "https://your-server.com/webhook",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Get the title of the top post",
+    "url": "https://news.ycombinator.com",
+    "webhook_url": "https://your-server.com/webhook"
+  }'
+```
+</CodeGroup>
+
+Skyvern sends a POST request to your URL when the task completes.
+
+**Example webhook payload:**
+
+```json
+{
+  "run_id": "tsk_v2_484019301257171242",
+  "run_type": "task_v2",
+  "status": "completed",
+  "output": {"title": "Show HN: I built a browser automation tool"},
+  "downloaded_files": [],
+  "recording_url": "https://skyvern-artifacts.s3.amazonaws.com/.../recording.webm",
+  "screenshot_urls": ["https://...screenshot_3.png", "https://...screenshot_2.png"],
+  "failure_reason": null,
+  "app_url": "https://app.skyvern.com/runs/tsk_v2_484019301257171242",
+  "browser_session_id": null,
+  "created_at": "2025-01-15T10:30:00Z",
+  "modified_at": "2025-01-15T10:30:45Z",
+  "queued_at": "2025-01-15T10:30:01Z",
+  "started_at": "2025-01-15T10:30:05Z",
+  "finished_at": "2025-01-15T10:30:45Z"
+}
+```
+
+**Webhook payload fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `run_id` | string | Unique identifier for this run (e.g., `tsk_123`, `tsk_v2_123`, `wr_123`) |
+| `run_type` | string | Type of run: `task_v1`, `task_v2`, `workflow_run`, `openai_cua`, `anthropic_cua` |
+| `status` | string | Final status of the run |
+| `output` | object \| array \| string \| null | Extracted data from the task |
+| `downloaded_files` | array | Files downloaded during execution |
+| `recording_url` | string \| null | Video recording of the browser session |
+| `screenshot_urls` | array \| null | URLs of the last three screenshots (latest first) |
+| `failure_reason` | string \| null | Error message if the run failed |
+| `app_url` | string | Link to view this run in Skyvern Cloud |
+| `browser_session_id` | string \| null | ID of the browser session, if one was used |
+| `max_screenshot_scrolls` | integer \| null | Number of scrolls for post-action screenshots |
+| `script_run` | object \| null | Script run result if AI fallback was triggered |
+| `created_at` | datetime | When the run was created |
+| `modified_at` | datetime | When the run was last updated |
+| `queued_at` | datetime \| null | When the run entered the queue |
+| `started_at` | datetime \| null | When execution began |
+| `finished_at` | datetime \| null | When execution completed |
+
+For webhook authentication and retry options, see [Webhooks FAQ](/running-automations/webhooks-faq).
+
+### Option 3: Wait for completion
+
+Block until the task finishes instead of polling manually.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Get the title of the top post",
+    url="https://news.ycombinator.com",
+    wait_for_completion=True,
+)
+print(result.output)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Get the title of the top post",
+    url: "https://news.ycombinator.com",
+  },
+  waitForCompletion: true,
+});
+console.log(result.output);
+```
+</CodeGroup>
+
+---
+
+## Get artifacts
+
+The run response contains high-level data like `output`, `recording_url`, and `screenshot_urls`. 
+
+Every run also generates Artifacts, such as screenshots, reasoning logs, downloaded files, for observability. To get them, use `get_run_artifacts`.
+
+<CodeGroup>
+```python Python
+artifacts = await client.get_run_artifacts(run_id)
+
+for artifact in artifacts:
+    print(f"{artifact.artifact_type}: {artifact.signed_url}")
+```
+
+```typescript TypeScript
+const artifacts = await client.getRunArtifacts(runId);
+
+for (const artifact of artifacts) {
+  console.log(`${artifact.artifactType}: ${artifact.signedUrl}`);
+}
+```
+
+```bash cURL
+curl -X GET "https://api.skyvern.com/v1/runs/RUN_ID/artifacts" \
+  -H "x-api-key: $SKYVERN_API_KEY"
+```
+</CodeGroup>
+
+**Example response:**
+
+```json
+[
+  {
+    "artifact_id": "art_123",
+    "artifact_type": "recording",
+    "uri": "s3://skyvern-artifacts/.../recording.webm",
+    "signed_url": "https://skyvern-artifacts.s3.amazonaws.com/.../recording.webm?...",
+    "task_id": "tsk_v2_484019301257171242",
+    "step_id": null,
+    "organization_id": "org_456",
+    "created_at": "2025-01-15T10:30:45Z",
+    "modified_at": "2025-01-15T10:30:45Z"
+  },
+  {
+    "artifact_id": "art_124",
+    "artifact_type": "screenshot_final",
+    "uri": "s3://skyvern-artifacts/.../screenshot.png",
+    "signed_url": "https://skyvern-artifacts.s3.amazonaws.com/.../screenshot.png?...",
+    "task_id": "tsk_v2_484019301257171242",
+    "step_id": "stp_789",
+    "organization_id": "org_456",
+    "created_at": "2025-01-15T10:30:44Z",
+    "modified_at": "2025-01-15T10:30:44Z"
+  }
+]
+```
+
+**Artifact fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `artifact_id` | string | Unique identifier for the artifact |
+| `artifact_type` | string | Type of artifact (see table below) |
+| `uri` | string | Internal storage path |
+| `signed_url` | string \| null | Pre-signed URL for downloading |
+| `task_id` | string \| null | Associated task ID |
+| `step_id` | string \| null | Associated step ID |
+| `workflow_run_id` | string \| null | Associated workflow run ID |
+| `workflow_run_block_id` | string \| null | Associated workflow block ID |
+| `organization_id` | string | Organization that owns this artifact |
+| `created_at` | datetime | When the artifact was created |
+| `modified_at` | datetime | When the artifact was last modified |
+
+**Artifact types:**
+
+| Type | Description |
+|------|-------------|
+| `recording` | Full video of the browser session |
+| `screenshot` | Screenshot captured during execution |
+| `screenshot_action` | Screenshot taken after an action |
+| `screenshot_final` | Final screenshot when task completed |
+| `screenshot_llm` | Screenshot sent to the LLM for analysis |
+| `har` | HTTP Archive file for network debugging |
+| `browser_console_log` | Browser console output |
+| `skyvern_log` | Skyvern execution logs |
+| `html` | Page HTML at various points |
+| `llm_prompt` | Prompt sent to the LLM |
+| `llm_response` | Response from the LLM |
+
+You can filter by artifact type using query parameters:
+
+```bash
+curl -X GET "https://api.skyvern.com/v1/runs/RUN_ID/artifacts?artifact_type=screenshot&artifact_type=recording" \
+  -H "x-api-key: $SKYVERN_API_KEY"
+```
+
+<Warning>
+**Billing:** You're charged per step. Use `max_steps` to cap costs during development.
+</Warning>
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Task Parameters"
+    icon="sliders"
+    href="/running-automations/task-parameters"
+  >
+    Configure engines, proxies, extraction schemas, and more
+  </Card>
+  <Card
+    title="Visualizing Results"
+    icon="eye"
+    href="/running-automations/visualizing-results"
+  >
+    View recordings, screenshots, and step-by-step breakdowns
+  </Card>
+  <Card
+    title="Webhooks FAQ"
+    icon="webhook"
+    href="/running-automations/webhooks-faq"
+  >
+    Set up callbacks and handle webhook authentication
+  </Card>
+  <Card
+    title="API Reference"
+    icon="code"
+    href="/api-reference/api-reference/agent/run-task"
+  >
+    Full API documentation for run_task
+  </Card>
+</CardGroup>
