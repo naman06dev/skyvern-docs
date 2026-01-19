@@ -1,0 +1,843 @@
+---
+title: Task Parameters
+subtitle: Configure how your task runs
+slug: running-automations/task-parameters
+---
+
+This page covers all parameters you can pass to `run_task`.
+
+Only `prompt` is a required parameter.
+
+---
+
+## Quick reference
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| [`prompt`](#prompt) | string | **Required.** Natural language instructions for the AI |
+| [`url`](#url) | string | Starting URL for the task |
+| [`engine`](#engine) | string | AI engine to use (default: `skyvern-2.0`) |
+| [`data_extraction_schema`](#data_extraction_schema) | object | JSON Schema for structured output |
+| [`max_steps`](#max_steps) | integer | Maximum steps before task fails |
+| [`proxy_location`](#proxy_location) | string \| object | Geographic proxy location |
+| [`browser_session_id`](#browser_session_id) | string | Run in a persistent browser session |
+| [`totp_identifier`](#totp_identifier) | string | Identifier for 2FA codes |
+| [`totp_url`](#totp_url) | string | URL to fetch TOTP codes |
+| [`error_code_mapping`](#error_code_mapping) | object | Custom error codes |
+| [`webhook_url`](#webhook_url) | string | URL to receive completion notification |
+| [`title`](#title) | string | Display name for the task |
+| [`extra_http_headers`](#extra_http_headers) | object | Additional HTTP headers |
+| [`publish_workflow`](#publish_workflow) | boolean | Convert task to reusable workflow |
+| [`max_screenshot_scrolls`](#max_screenshot_scrolls) | integer | Scrolls for post-action screenshots |
+| [`browser_address`](#browser_address) | string | CDP address for local browser |
+| [`include_action_history_in_verification`](#include_action_history_in_verification) | boolean | Include action history in verification |
+| [`model`](#model) | object | Optional model configuration |
+
+---
+
+## `prompt`
+
+**Required.** Natural language instructions describing what the AI should do.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Find the cheapest flight from NYC to LAX on March 15"
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Find the cheapest flight from NYC to LAX on March 15",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Find the cheapest flight from NYC to LAX on March 15"
+  }'
+```
+</CodeGroup>
+
+Be specific about your goal and what data you want extracted. The more detailed your prompt, the better the results.
+
+---
+
+## `url`
+
+The starting page for the automation. Skyvern navigates from here based on your prompt.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Get the top headline",
+    url="https://news.ycombinator.com"
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Get the top headline",
+    url: "https://news.ycombinator.com",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Get the top headline",
+    "url": "https://news.ycombinator.com"
+  }'
+```
+</CodeGroup>
+
+If not provided, Skyvern attempts to determine an appropriate starting URL from your prompt.
+
+---
+
+## `engine`
+
+The AI engine that powers the task.
+
+| Engine | Description |
+|--------|-------------|
+| `skyvern-2.0` | **Default.** Latest model, 85.85% on WebVoyager benchmark. Best for complex, multi-step tasks. |
+| `skyvern-1.0` | Previous model. Good for simple tasks like form filling or single-page extraction. |
+| `openai-cua` | OpenAI's Computer Use Agent |
+| `anthropic-cua` | Anthropic Claude Sonnet with computer use |
+| `ui-tars` | UI-TARS model (Seed1.5-VL) via Doubao API |
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Fill out the contact form",
+    engine="skyvern-1.0"
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Fill out the contact form",
+    engine: "skyvern-1.0",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Fill out the contact form",
+    "engine": "skyvern-1.0"
+  }'
+```
+</CodeGroup>
+
+---
+
+## `data_extraction_schema`
+
+A [JSON Schema](https://json-schema.org/) defining the structure of output data.
+
+Use this when you need consistent, typed responses.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Find the top post on Hacker News",
+    data_extraction_schema={
+        "type": "object",
+        "properties": {
+            "title": {
+                "type": "string",
+                "description": "The title of the top post"
+            },
+            "points": {
+                "type": "integer",
+                "description": "Number of points"
+            }
+        }
+    }
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Find the top post on Hacker News",
+    dataExtractionSchema: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description: "The title of the top post",
+        },
+        points: {
+          type: "integer",
+          description: "Number of points",
+        },
+      },
+    },
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Find the top post on Hacker News",
+    "data_extraction_schema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "The title of the top post"
+        },
+        "points": {
+          "type": "integer",
+          "description": "Number of points"
+        }
+      }
+    }
+  }'
+```
+</CodeGroup>
+
+Without a schema, output format varies based on what the AI extracts. With a schema, output matches your defined structure.
+
+---
+
+## `max_steps`
+
+Maximum number of steps the task can take. The task fails if it exceeds this limit.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Get the current stock price of AAPL",
+    max_steps=10
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Get the current stock price of AAPL",
+    maxSteps: 10,
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Get the current stock price of AAPL",
+    "max_steps": 10
+  }'
+```
+</CodeGroup>
+
+On the cloud hosted version, you're billed per step. Set this to a reasonable value during development to cap costs.
+
+---
+
+## `proxy_location`
+
+Route browser traffic through a residential proxy in a specific location.
+
+Use this for geo-restricted content or to reduce bot detection.
+
+**Country-level pools:**
+
+| Value | Location |
+|-------|----------|
+| `RESIDENTIAL` | Random US residential (default) |
+| `RESIDENTIAL_GB` | United Kingdom |
+| `RESIDENTIAL_DE` | Germany |
+| `RESIDENTIAL_FR` | France |
+| `RESIDENTIAL_ES` | Spain |
+| `RESIDENTIAL_IE` | Ireland |
+| `RESIDENTIAL_IN` | India |
+| `RESIDENTIAL_JP` | Japan |
+| `RESIDENTIAL_AU` | Australia |
+| `RESIDENTIAL_CA` | Canada |
+| `RESIDENTIAL_BR` | Brazil |
+| `RESIDENTIAL_MX` | Mexico |
+| `RESIDENTIAL_AR` | Argentina |
+| `RESIDENTIAL_NZ` | New Zealand |
+| `RESIDENTIAL_ZA` | South Africa |
+| `RESIDENTIAL_IT` | Italy |
+| `RESIDENTIAL_NL` | Netherlands |
+| `RESIDENTIAL_PH` | Philippines |
+| `RESIDENTIAL_TR` | Turkey |
+| `RESIDENTIAL_ISP` | ISP proxy |
+| `NONE` | No proxy |
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Get UK-specific pricing",
+    proxy_location="RESIDENTIAL_GB"
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Get UK-specific pricing",
+    proxyLocation: "RESIDENTIAL_GB",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Get UK-specific pricing",
+    "proxy_location": "RESIDENTIAL_GB"
+  }'
+```
+</CodeGroup>
+
+**Granular targeting (US states/cities):**
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Get California pricing",
+    proxy_location={
+        "country": "US",
+        "subdivision": "CA",
+        "city": "San Francisco"
+    }
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Get California pricing",
+    proxyLocation: {
+      country: "US",
+      subdivision: "CA",
+      city: "San Francisco",
+    },
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Get California pricing",
+    "proxy_location": {
+      "country": "US",
+      "subdivision": "CA",
+      "city": "San Francisco"
+    }
+  }'
+```
+</CodeGroup>
+
+See [Proxy & Geo Targeting](/running-tasks/proxy-location) for the full list.
+
+---
+
+## `browser_session_id`
+
+Run the task in an existing persistent browser session.
+
+Use this to maintain state (cookies, localStorage) across multiple tasks.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Extract account data",
+    browser_session_id="pbs_123"
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Extract account data",
+    browserSessionId: "pbs_123",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Extract account data",
+    "browser_session_id": "pbs_123"
+  }'
+```
+</CodeGroup>
+
+See [Browser Sessions](/browser-sessions/introduction) for details.
+
+---
+
+## `totp_identifier`
+
+Identifier for TOTP codes when you push codes to Skyvern's API.
+
+Use this for two-factor authentication during task execution.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Log in and extract account balance",
+    totp_identifier="my-2fa-credential"
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Log in and extract account balance",
+    totpIdentifier: "my-2fa-credential",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Log in and extract account balance",
+    "totp_identifier": "my-2fa-credential"
+  }'
+```
+</CodeGroup>
+
+See [2FA Support (TOTP)](/credentials/totp) for setup instructions.
+
+---
+
+## `totp_url`
+
+URL that Skyvern calls to fetch TOTP codes when needed.
+
+Use this when Skyvern should retrieve codes from your endpoint.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Log in and extract account balance",
+    totp_url="https://your-server.com/totp"
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Log in and extract account balance",
+    totpUrl: "https://your-server.com/totp",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Log in and extract account balance",
+    "totp_url": "https://your-server.com/totp"
+  }'
+```
+</CodeGroup>
+
+See [2FA Support (TOTP)](/credentials/totp) for setup instructions.
+
+---
+
+## `error_code_mapping`
+
+Map specific error conditions to custom error codes.
+
+Use this to make programmatic error handling easier.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Log in and extract data",
+    error_code_mapping={
+        "login_failed": "The login credentials are incorrect or the account is locked",
+        "maintenance_mode": "The website is down for maintenance"
+    }
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Log in and extract data",
+    errorCodeMapping: {
+      login_failed: "The login credentials are incorrect or the account is locked",
+      maintenance_mode: "The website is down for maintenance",
+    },
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Log in and extract data",
+    "error_code_mapping": {
+      "login_failed": "The login credentials are incorrect or the account is locked",
+      "maintenance_mode": "The website is down for maintenance"
+    }
+  }'
+```
+</CodeGroup>
+
+If Skyvern encounters a login failure matching your description, `output` contains `{"error": "login_failed"}` instead of a generic error message.
+
+---
+
+## `webhook_url`
+
+URL to receive a POST request when the task completes.
+
+Use this instead of polling for production systems.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Extract pricing data",
+    webhook_url="https://your-server.com/webhook"
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Extract pricing data",
+    webhookUrl: "https://your-server.com/webhook",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Extract pricing data",
+    "webhook_url": "https://your-server.com/webhook"
+  }'
+```
+</CodeGroup>
+
+See [Webhooks FAQ](/running-tasks/webhooks-faq) for payload schema and authentication.
+
+---
+
+## `title`
+
+Display name for the task in the Skyvern UI.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Get the top post",
+    title="HN Top Post Scraper"
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Get the top post",
+    title: "HN Top Post Scraper",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Get the top post",
+    "title": "HN Top Post Scraper"
+  }'
+```
+</CodeGroup>
+
+---
+
+## `extra_http_headers`
+
+Additional HTTP headers to include in browser requests.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Access protected resource",
+    extra_http_headers={
+        "Authorization": "Bearer your-token"
+    }
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Access protected resource",
+    extraHttpHeaders: {
+      Authorization: "Bearer your-token",
+    },
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Access protected resource",
+    "extra_http_headers": {
+      "Authorization": "Bearer your-token"
+    }
+  }'
+```
+</CodeGroup>
+
+---
+
+## `publish_workflow`
+
+Convert this task into a reusable workflow. Only available for `skyvern-2.0`.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Fill out the contact form with provided data",
+    publish_workflow=True
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Fill out the contact form with provided data",
+    publishWorkflow: true,
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Fill out the contact form with provided data",
+    "publish_workflow": true
+  }'
+```
+</CodeGroup>
+
+---
+
+## `max_screenshot_scrolls`
+
+Number of scrolls for post-action screenshots.
+
+Use this for pages with lazy-loaded content.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Extract all product listings",
+    max_screenshot_scrolls=3
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Extract all product listings",
+    maxScreenshotScrolls: 3,
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Extract all product listings",
+    "max_screenshot_scrolls": 3
+  }'
+```
+</CodeGroup>
+
+---
+
+## `browser_address`
+
+Connect to a browser at a specific CDP address.
+
+Use this for local development only.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Automate my local browser",
+    browser_address="http://127.0.0.1:9222"
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Automate my local browser",
+    browserAddress: "http://127.0.0.1:9222",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Automate my local browser",
+    "browser_address": "http://127.0.0.1:9222"
+  }'
+```
+</CodeGroup>
+
+---
+
+## `model`
+
+Optional model configuration for the task.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Extract data from the page",
+    model={"temperature": 0.5}
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Extract data from the page",
+    model: { temperature: 0.5 },
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Extract data from the page",
+    "model": {"temperature": 0.5}
+  }'
+```
+</CodeGroup>
+
+---
+
+## `include_action_history_in_verification`
+
+Include action history when verifying task completion. Default: `false`.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Complete the multi-step form",
+    include_action_history_in_verification=True
+)
+```
+
+```typescript TypeScript
+const result = await client.runTask({
+  body: {
+    prompt: "Complete the multi-step form",
+    includeActionHistoryInVerification: true,
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Complete the multi-step form",
+    "include_action_history_in_verification": true
+  }'
+```
+</CodeGroup>
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Getting Structured Data"
+    icon="eye"
+    href="/running-automations/visualizing-results"
+  >
+    View recordings, screenshots, and step-by-step breakdowns
+  </Card>
+  <Card
+    title="Proxy & Geo Targeting"
+    icon="globe"
+    href="/running-tasks/proxy-location"
+  >
+    Full list of proxy locations
+  </Card>
+  <Card
+    title="Browser Sessions"
+    icon="window"
+    href="/browser-sessions/introduction"
+  >
+    Persist browser state across tasks
+  </Card>
+  <Card
+    title="2FA Support"
+    icon="key"
+    href="/credentials/totp"
+  >
+    Handle TOTP authentication
+  </Card>
+</CardGroup>
