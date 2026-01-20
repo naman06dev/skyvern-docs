@@ -148,13 +148,11 @@ curl -X POST "https://api.skyvern.com/v1/run/tasks" \
 ```
 </CodeGroup>
 
-**Response:**
+**Output (when completed):**
 
 ```json
 {
-  "output": {
-    "price": 67432.51
-  }
+  "price": 104521.37
 }
 ```
 
@@ -270,19 +268,37 @@ curl -X POST "https://api.skyvern.com/v1/run/tasks" \
 ```
 </CodeGroup>
 
-**Response:**
+**Output (when completed):**
 
 ```json
 {
-  "output": {
-    "posts": [
-      {"title": "Show HN: I built a browser automation tool", "points": 342, "url": "https://..."},
-      {"title": "The future of AI agents", "points": 287, "url": "https://..."},
-      {"title": "Why Rust is taking over systems programming", "points": 256, "url": "https://..."},
-      {"title": "A deep dive into WebAssembly", "points": 198, "url": "https://..."},
-      {"title": "How we scaled to 1M users", "points": 176, "url": "https://..."}
-    ]
-  }
+  "posts": [
+    {
+      "title": "Running Claude Code dangerously (safely)",
+      "points": 342,
+      "url": "https://blog.emilburzo.com/2026/01/running-claude-code-dangerously-safely/"
+    },
+    {
+      "title": "Linux kernel framework for PCIe device emulation",
+      "points": 287,
+      "url": "https://github.com/cakehonolulu/pciem"
+    },
+    {
+      "title": "I'm addicted to being useful",
+      "points": 256,
+      "url": "https://www.seangoedecke.com/addicted-to-being-useful/"
+    },
+    {
+      "title": "Level S4 solar radiation event",
+      "points": 198,
+      "url": "https://www.swpc.noaa.gov/news/g4-severe-geomagnetic-storm"
+    },
+    {
+      "title": "WebAssembly Text Format parser performance",
+      "points": 176,
+      "url": "https://blog.gplane.win/posts/improve-wat-parser-perf.html"
+    }
+  ]
 }
 ```
 
@@ -461,22 +477,20 @@ curl -X POST "https://api.skyvern.com/v1/run/tasks" \
 ```
 </CodeGroup>
 
-**Response:**
+**Output (when completed):**
 
 ```json
 {
-  "output": {
-    "product": {
-      "name": "Wireless Bluetooth Headphones",
-      "pricing": {
-        "current_price": 79.99,
-        "original_price": 129.99,
-        "discount_percent": 38
-      },
-      "availability": {
-        "in_stock": true,
-        "delivery_estimate": "Tomorrow, Jan 20"
-      }
+  "product": {
+    "name": "Wireless Bluetooth Headphones",
+    "pricing": {
+      "current_price": 79.99,
+      "original_price": 129.99,
+      "discount_percent": 38
+    },
+    "availability": {
+      "in_stock": true,
+      "delivery_estimate": "Tomorrow, Jan 21"
     }
   }
 }
@@ -486,7 +500,7 @@ curl -X POST "https://api.skyvern.com/v1/run/tasks" \
 
 ## Accessing extracted data
 
-The extracted data appears in the `output` field of the response.
+The extracted data appears in the `output` field of the completed run. Poll until the task reaches a terminal state, then access the output.
 
 <CodeGroup>
 ```python Python
@@ -499,13 +513,21 @@ result = await client.run_task(
             "title": {"type": "string", "description": "Post title"},
             "points": {"type": "integer", "description": "Points"}
         }
-    },
-    wait_for_completion=True
+    }
 )
 
+run_id = result.run_id
+
+while True:
+    run = await client.get_run(run_id)
+
+    if run.status in ["completed", "failed", "terminated", "timed_out", "canceled"]:
+        break
+
+    await asyncio.sleep(5)
+
 # Access the extracted data
-print(result.output["title"])
-print(result.output["points"])
+print(f"Output: {run.output}")
 ```
 
 ```typescript TypeScript
@@ -521,12 +543,25 @@ const result = await client.runTask({
       },
     },
   },
-  waitForCompletion: true,
 });
 
-// Access the extracted data
-console.log(result.output.title);
-console.log(result.output.points);
+const runId = result.run_id;
+
+while (true) {
+  const run = await client.getRun(runId);
+
+  if (["completed", "failed", "terminated", "timed_out", "canceled"].includes(run.status)) {
+    console.log(`Output: ${JSON.stringify(run.output)}`);
+    break;
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, 5000));
+}
+```
+
+```bash cURL
+curl -X GET "https://api.skyvern.com/v1/runs/$RUN_ID" \
+  -H "x-api-key: $SKYVERN_API_KEY"
 ```
 </CodeGroup>
 
