@@ -200,13 +200,17 @@ When the task completes, you'll get a response like this:
 
 ```json
 {
-  "run_id": "tsk_v2_484019301257171242",
+  "run_id": "tsk_v2_486305187432193504",
   "status": "completed",
   "output": {
-    "post_title": "There's a ridiculous amount of tech in a disposable vape"
+    "top_post_title": "Linux kernel framework for PCIe device emulation, in userspace"
   },
-  "recording_url": "https://skyvern-artifacts.s3.amazonaws.com/...",
-  "app_url": "https://app.skyvern.com/runs/wr_484019301257171248"
+  "downloaded_files": [],
+  "recording_url": "https://skyvern-artifacts.s3.amazonaws.com/v1/production/.../recording.webm?...",
+  "screenshot_urls": ["https://skyvern-artifacts.s3.amazonaws.com/v1/production/.../screenshot_final.png?..."],
+  "app_url": "https://app.skyvern.com/runs/wr_486305187432193510",
+  "step_count": 2,
+  "run_type": "task_v2"
 }
 ```
 
@@ -222,9 +226,9 @@ The `recording_url` field is included in every completed run response:
 
 ```json
 {
-  "run_id": "tsk_v2_484019301257171242",
+  "run_id": "tsk_v2_486305187432193504",
   "status": "completed",
-  "recording_url": "https://skyvern-artifacts.s3.amazonaws.com/v1/production/.../recording.webm?AWSAccessKeyId=...&Signature=...&Expires=..."
+  "recording_url": "https://skyvern-artifacts.s3.amazonaws.com/v1/production/o_485917350850524254/tsk_.../recording.webm?AWSAccessKeyId=...&Signature=...&Expires=..."
 }
 ```
 
