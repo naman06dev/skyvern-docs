@@ -12,26 +12,26 @@ Only `prompt` is a required parameter.
 
 ## Quick reference
 
-| Parameter | Type | Description |
+| Parameter | Type | Use this to |
 |-----------|------|-------------|
-| [`prompt`](#prompt) | string | **Required.** Natural language instructions for the AI |
-| [`url`](#url) | string | Starting URL for the task |
-| [`engine`](#engine) | string | AI engine to use (default: `skyvern-2.0`) |
-| [`data_extraction_schema`](#data_extraction_schema) | object | JSON Schema for structured output |
-| [`max_steps`](#max_steps) | integer | Maximum steps before task fails |
-| [`proxy_location`](#proxy_location) | string \| object | Geographic proxy location |
-| [`browser_session_id`](#browser_session_id) | string | Run in a persistent browser session |
-| [`totp_identifier`](#totp_identifier) | string | Identifier for 2FA codes |
-| [`totp_url`](#totp_url) | string | URL to fetch TOTP codes |
-| [`error_code_mapping`](#error_code_mapping) | object | Custom error codes |
-| [`webhook_url`](#webhook_url) | string | URL to receive completion notification |
-| [`title`](#title) | string | Display name for the task |
-| [`extra_http_headers`](#extra_http_headers) | object | Additional HTTP headers |
-| [`publish_workflow`](#publish_workflow) | boolean | Convert task to reusable workflow |
-| [`max_screenshot_scrolls`](#max_screenshot_scrolls) | integer | Scrolls for post-action screenshots |
-| [`browser_address`](#browser_address) | string | CDP address for local browser |
-| [`include_action_history_in_verification`](#include_action_history_in_verification) | boolean | Include action history in verification |
-| [`model`](#model) | object | Optional model configuration |
+| [`prompt`](#prompt) **(Required)** | string | Give natural language instructions for the AI |
+| [`url`](#url) | string | Give a starting URL for the task |
+| [`engine`](#engine) | string | Choose a different Agent model |
+| [`data_extraction_schema`](#data_extraction_schema) | object | Get consistent, structured JSON output |
+| [`max_steps`](#max_steps) | integer | Limit how long the Agent runs and cap costs |
+| [`proxy_location`](#proxy_location) | string \| object | Access geo-restricted content or reduce bot detection |
+| [`browser_session_id`](#browser_session_id) | string | Maintain state (cookies, login) across multiple tasks |
+| [`totp_identifier`](#totp_identifier) | string | Handle 2FA when pushing codes to Skyvern |
+| [`totp_url`](#totp_url) | string | Have Skyvern fetch 2FA codes from your endpoint |
+| [`error_code_mapping`](#error_code_mapping) | object | Get custom error codes for programmatic handling |
+| [`webhook_url`](#webhook_url) | string | Get notified when the task completes |
+| [`title`](#title) | string | Label the task in the Skyvern UI |
+| [`extra_http_headers`](#extra_http_headers) | object | Add custom headers (e.g., Authorization) to browser requests |
+| [`publish_workflow`](#publish_workflow) | boolean | Convert this task into a reusable workflow |
+| [`max_screenshot_scrolls`](#max_screenshot_scrolls) | integer | Capture lazy-loaded content in screenshots |
+| [`browser_address`](#browser_address) | string | Connect to your own browser for local development |
+| [`include_action_history_in_verification`](#include_action_history_in_verification) | boolean | Improve verification accuracy for multi-step forms |
+| [`model`](#model) | object | Configure model settings (e.g., temperature) |
 
 ---
 
