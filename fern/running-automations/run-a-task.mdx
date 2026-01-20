@@ -10,21 +10,7 @@ You describe what you want in natural language, and Skyvern's AI navigates the w
 
 ---
 
-## When to use Tasks vs Workflows
-
-| Scenario | Use |
-|----------|-----|
-| One-off automation, quick data extraction | **Task** |
-| Experimenting or prototyping | **Task** |
-| Multi-step process with branching logic | **Workflow** |
-| Reusable automation shared across your team | **Workflow** |
-| Automation with loops, conditionals, or chained steps | **Workflow** |
-
-Use Workflows to chain multiple steps together—they can be saved, versioned, and reused.
-
----
-
-## Run a task
+## Call `run_task`
 
 A task requires two parameters:
 
@@ -70,7 +56,7 @@ async function main() {
     },
   });
 
-  console.log(`Run ID: ${result.runId}`);
+  console.log(`Run ID: ${result.run_id}`);
   console.log(`Status: ${result.status}`);
 }
 
@@ -92,11 +78,17 @@ curl -X POST "https://api.skyvern.com/v1/run/tasks" \
 
 ```json
 {
-  "run_id": "tsk_v2_484019301257171242",
-  "status": "created",
-  "run_type": "task_v2",
-  "created_at": "2025-01-15T10:30:00Z",
-  "modified_at": "2025-01-15T10:30:00Z"
+  "run_id": "tsk_v2_486305187432193504",
+  "status": "queued",
+  "output": null,
+  "downloaded_files": null,
+  "recording_url": null,
+  "screenshot_urls": null,
+  "failure_reason": null,
+  "created_at": "2026-01-20T11:52:29.276851",
+  "modified_at": "2026-01-20T11:52:29.484284",
+  "app_url": "https://app.skyvern.com/runs/wr_486305187432193510",
+  "run_type": "task_v2"
 }
 ```
 
@@ -143,7 +135,7 @@ print(f"Output: {run.output}")
 ```
 
 ```typescript TypeScript
-const runId = result.runId;
+const runId = result.run_id;
 
 while (true) {
   const run = await client.getRun(runId);
@@ -196,7 +188,7 @@ const result = await client.runTask({
   body: {
     prompt: "Get the title of the top post",
     url: "https://news.ycombinator.com",
-    webhookUrl: "https://your-server.com/webhook",
+    webhook_url: "https://your-server.com/webhook",
   },
 });
 ```
@@ -215,11 +207,10 @@ curl -X POST "https://api.skyvern.com/v1/run/tasks" \
 
 For webhook authentication and retry options, see [Webhooks FAQ](/running-automations/webhooks-faq).
 
-### Option 3: Wait for completion
+### Option 3: Wait for completion (Python only)
 
 Block until the task finishes instead of polling manually.
 
-<CodeGroup>
 ```python Python
 result = await client.run_task(
     prompt="Get the title of the top post",
@@ -229,65 +220,118 @@ result = await client.run_task(
 print(result.output)
 ```
 
-```typescript TypeScript
-const result = await client.runTask({
-  body: {
-    prompt: "Get the title of the top post",
-    url: "https://news.ycombinator.com",
-  },
-  waitForCompletion: true,
-});
-console.log(result.output);
-```
-</CodeGroup>
-
 ---
 
-## Understanding the response
+## Understand the response
 
-**Example response:**
+The response from polling (`get_run`) and webhooks have slightly different structures. Both contain the core task data, but webhooks include additional metadata.
 
-```json
+<CodeGroup>
+```json Polling Response
 {
-  "run_id": "tsk_v2_484019301257171242",
-  "run_type": "task_v2",
+  "run_id": "tsk_v2_486305187432193504",
   "status": "completed",
-  "output": {"title": "Show HN: I built a browser automation tool"},
+  "output": {
+    "top_post_title": "Linux kernel framework for PCIe device emulation, in userspace"
+  },
   "downloaded_files": [],
-  "recording_url": "https://skyvern-artifacts.s3.amazonaws.com/.../recording.webm",
-  "screenshot_urls": ["https://...screenshot_3.png", "https://...screenshot_2.png"],
+  "recording_url": "https://skyvern-artifacts.s3.amazonaws.com/v1/production/.../recording.webm?...",
+  "screenshot_urls": ["https://skyvern-artifacts.s3.amazonaws.com/.../screenshot_final.png?..."],
   "failure_reason": null,
-  "app_url": "https://app.skyvern.com/runs/tsk_v2_484019301257171242",
+  "errors": [],
+  "step_count": 2,
+  "run_type": "task_v2",
+  "app_url": "https://app.skyvern.com/runs/wr_486305187432193510",
   "browser_session_id": null,
-  "created_at": "2025-01-15T10:30:00Z",
-  "modified_at": "2025-01-15T10:30:45Z",
-  "queued_at": "2025-01-15T10:30:01Z",
-  "started_at": "2025-01-15T10:30:05Z",
-  "finished_at": "2025-01-15T10:30:45Z"
+  "browser_profile_id": null,
+  "created_at": "2026-01-20T11:52:29.276851",
+  "modified_at": "2026-01-20T11:54:08.822807",
+  "queued_at": "2026-01-20T11:52:29.483922",
+  "started_at": "2026-01-20T11:52:31.835337",
+  "finished_at": "2026-01-20T11:54:08.821985",
+  "run_request": {
+    "prompt": "Get the title of the top post",
+    "url": "https://news.ycombinator.com/",
+    "engine": "skyvern-2.0"
+  }
 }
 ```
 
-**Response fields:**
+```json Webhook Payload
+{
+  "task_id": "tsk_v2_486306851394503256",
+  "run_id": "tsk_v2_486306851394503256",
+  "status": "completed",
+  "output": {
+    "top_post_title": "Linux kernel framework for PCIe device emulation, in userspace"
+  },
+  "summary": "I have successfully navigated to Hacker News and extracted the title of the top post.",
+  "prompt": "Get the title of the top post",
+  "url": "https://news.ycombinator.com/",
+  "downloaded_files": [],
+  "recording_url": "https://skyvern-artifacts.s3.amazonaws.com/v1/production/.../recording.webm?...",
+  "screenshot_urls": ["https://skyvern-artifacts.s3.amazonaws.com/.../screenshot_final.png?..."],
+  "failure_reason": null,
+  "errors": [],
+  "step_count": 2,
+  "run_type": "task_v2",
+  "app_url": "https://app.skyvern.com/runs/wr_486306851394503262",
+  "organization_id": "o_485917350850524254",
+  "workflow_run_id": "wr_486306851394503262",
+  "proxy_location": "RESIDENTIAL",
+  "webhook_callback_url": "https://your-server.com/webhook",
+  "created_at": "2026-01-20T11:58:57.414123",
+  "modified_at": "2026-01-20T12:00:31.513449",
+  "queued_at": "2026-01-20T11:58:57.607233",
+  "started_at": "2026-01-20T11:58:59.395028",
+  "finished_at": "2026-01-20T12:00:31.512692"
+}
+```
+</CodeGroup>
+
+**Common fields (both polling and webhook):**
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `run_id` | string | Unique identifier for this run (e.g., `tsk_123`, `tsk_v2_123`) |
-| `run_type` | string | Type of run: `task_v1`, `task_v2`, `openai_cua`, `anthropic_cua` |
-| `status` | string | Current status of the run |
-| `output` | object \| array \| string \| null | Extracted data from the task |
+| `run_id` | string | Unique identifier for this run |
+| `status` | string | Current status: `queued`, `running`, `completed`, `failed`, `terminated`, `timed_out`, `canceled` |
+| `output` | object \| null | Extracted data from the task |
 | `downloaded_files` | array | Files downloaded during execution |
 | `recording_url` | string \| null | Video recording of the browser session |
-| `screenshot_urls` | array \| null | URLs of the last three screenshots (latest first) |
+| `screenshot_urls` | array \| null | Screenshots captured (latest first) |
 | `failure_reason` | string \| null | Error message if the run failed |
+| `errors` | array | List of errors encountered |
+| `step_count` | integer \| null | Number of steps executed |
+| `run_type` | string | Type of run: `task_v2`, `openai_cua`, `anthropic_cua` |
 | `app_url` | string | Link to view this run in Skyvern Cloud |
-| `browser_session_id` | string \| null | ID of the browser session, if one was used |
-| `max_screenshot_scrolls` | integer \| null | Number of scrolls for post-action screenshots |
-| `script_run` | object \| null | Script run result if AI fallback was triggered |
 | `created_at` | datetime | When the run was created |
 | `modified_at` | datetime | When the run was last updated |
 | `queued_at` | datetime \| null | When the run entered the queue |
 | `started_at` | datetime \| null | When execution began |
 | `finished_at` | datetime \| null | When execution completed |
+
+**Polling-only fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `run_request` | object | Original request parameters (prompt, url, engine, etc.) |
+| `browser_session_id` | string \| null | ID of the browser session used |
+| `browser_profile_id` | string \| null | ID of the browser profile used |
+| `max_screenshot_scrolls` | integer \| null | Number of scrolls for screenshots |
+| `script_run` | object \| null | Script run result if AI fallback triggered |
+
+**Webhook-only fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `task_id` | string | Same as `run_id` |
+| `summary` | string | AI-generated description of what was done |
+| `prompt` | string | The prompt from the original request |
+| `url` | string | The URL from the original request |
+| `organization_id` | string | Your organization ID |
+| `workflow_run_id` | string | Associated workflow run ID |
+| `proxy_location` | string | Proxy location used (e.g., `RESIDENTIAL`) |
+| `webhook_callback_url` | string | The webhook URL that received this payload |
 
 ---
 
@@ -309,7 +353,7 @@ for artifact in artifacts:
 const artifacts = await client.getRunArtifacts(runId);
 
 for (const artifact of artifacts) {
-  console.log(`${artifact.artifactType}: ${artifact.signedUrl}`);
+  console.log(`${artifact.artifact_type}: ${artifact.signed_url}`);
 }
 ```
 
@@ -326,26 +370,32 @@ This returns a list of artifacts.
 ```json
 [
   {
-    "artifact_id": "art_123",
+    "artifact_id": "a_486305284826607484",
     "artifact_type": "recording",
-    "uri": "s3://skyvern-artifacts/.../recording.webm",
-    "signed_url": "https://skyvern-artifacts.s3.amazonaws.com/.../recording.webm?...",
-    "task_id": "tsk_v2_484019301257171242",
-    "step_id": null,
-    "organization_id": "org_456",
-    "created_at": "2025-01-15T10:30:45Z",
-    "modified_at": "2025-01-15T10:30:45Z"
+    "uri": "s3://skyvern-artifacts/v1/production/.../recording.webm",
+    "signed_url": "https://skyvern-artifacts.s3.amazonaws.com/v1/production/.../recording.webm?...",
+    "task_id": "tsk_486305246171901814",
+    "step_id": "stp_486305250466869112",
+    "workflow_run_id": "wr_486305187432193510",
+    "workflow_run_block_id": null,
+    "run_id": "tsk_v2_486305187432193504",
+    "organization_id": "o_485917350850524254",
+    "created_at": "2026-01-20T11:52:52.083001",
+    "modified_at": "2026-01-20T11:52:52.083003"
   },
   {
-    "artifact_id": "art_124",
+    "artifact_id": "a_486305516754841578",
     "artifact_type": "screenshot_final",
-    "uri": "s3://skyvern-artifacts/.../screenshot.png",
-    "signed_url": "https://skyvern-artifacts.s3.amazonaws.com/.../screenshot.png?...",
-    "task_id": "tsk_v2_484019301257171242",
-    "step_id": "stp_789",
-    "organization_id": "org_456",
-    "created_at": "2025-01-15T10:30:44Z",
-    "modified_at": "2025-01-15T10:30:44Z"
+    "uri": "s3://skyvern-artifacts/v1/production/.../screenshot_final.png",
+    "signed_url": "https://skyvern-artifacts.s3.amazonaws.com/v1/production/.../screenshot_final.png?...",
+    "task_id": "tsk_486305439445430190",
+    "step_id": "stp_486305439445430192",
+    "workflow_run_id": "wr_486305187432193510",
+    "workflow_run_block_id": null,
+    "run_id": "tsk_v2_486305187432193504",
+    "organization_id": "o_485917350850524254",
+    "created_at": "2026-01-20T11:53:46.468908",
+    "modified_at": "2026-01-20T11:53:46.468910"
   }
 ]
 ```
@@ -360,6 +410,7 @@ This returns a list of artifacts.
 | `signed_url` | string \| null | Pre-signed URL for downloading |
 | `task_id` | string \| null | Associated task ID |
 | `step_id` | string \| null | Associated step ID |
+| `run_id` | string \| null | Associated run ID (e.g., `tsk_v2_...`) |
 | `workflow_run_id` | string \| null | Associated workflow run ID |
 | `workflow_run_block_id` | string \| null | Associated workflow block ID |
 | `organization_id` | string | Organization that owns this artifact |
@@ -375,12 +426,28 @@ This returns a list of artifacts.
 | `screenshot_action` | Screenshot taken after an action |
 | `screenshot_final` | Final screenshot when task completed |
 | `screenshot_llm` | Screenshot sent to the LLM for analysis |
+| `html` | Page HTML at various points |
+| `html_scrape` | Scraped HTML content |
+| `html_action` | HTML captured after an action |
 | `har` | HTTP Archive file for network debugging |
+| `trace` | Execution trace data |
+| `pdf` | PDF files generated or downloaded |
+| `script_file` | Generated script files |
 | `browser_console_log` | Browser console output |
 | `skyvern_log` | Skyvern execution logs |
-| `html` | Page HTML at various points |
+| `skyvern_log_raw` | Raw Skyvern execution logs |
 | `llm_prompt` | Prompt sent to the LLM |
+| `llm_request` | Full request sent to the LLM |
 | `llm_response` | Response from the LLM |
+| `llm_response_parsed` | Parsed LLM response |
+| `llm_response_rendered` | Rendered LLM response |
+| `visible_elements_tree` | DOM tree of visible elements |
+| `visible_elements_tree_trimmed` | Trimmed DOM tree |
+| `visible_elements_tree_in_prompt` | DOM tree included in prompt |
+| `visible_elements_id_css_map` | CSS selector map for elements |
+| `visible_elements_id_frame_map` | Frame map for elements |
+| `visible_elements_id_xpath_map` | XPath map for elements |
+| `hashed_href_map` | Hashed href mapping |
 
 You can filter by artifact type using query parameters:
 
