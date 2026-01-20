@@ -560,8 +560,21 @@ while (true) {
 ```
 
 ```bash cURL
-curl -X GET "https://api.skyvern.com/v1/runs/$RUN_ID" \
-  -H "x-api-key: $SKYVERN_API_KEY"
+RUN_ID="your_run_id_here"
+
+while true; do
+  RESPONSE=$(curl -s -X GET "https://api.skyvern.com/v1/runs/$RUN_ID" \
+    -H "x-api-key: $SKYVERN_API_KEY")
+
+  STATUS=$(echo "$RESPONSE" | jq -r '.status')
+
+  if [[ "$STATUS" == "completed" || "$STATUS" == "failed" || "$STATUS" == "terminated" || "$STATUS" == "timed_out" || "$STATUS" == "canceled" ]]; then
+    echo "$RESPONSE" | jq '.output'
+    break
+  fi
+
+  sleep 5
+done
 ```
 </CodeGroup>
 
