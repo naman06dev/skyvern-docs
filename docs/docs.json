@@ -32,6 +32,14 @@
               "running-automations/task-parameters",
               "running-automations/extract-structured-data"
             ]
+          },
+          {
+            "group": "Optimization",
+            "pages": [
+              "optimization/browser-sessions",
+              "optimization/browser-profiles",
+              "optimization/cost-control"
+            ]
           }
         ]
       },

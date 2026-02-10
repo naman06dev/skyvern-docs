@@ -1,0 +1,133 @@
+---
+title: Cost Control
+subtitle: Limit steps and optimize prompts to manage costs
+slug: optimization/cost-control
+---
+
+Skyvern Cloud uses a **credit-based billing model**. Each plan includes a monthly credit allowance that determines how many actions you can run.
+
+| Plan | Price | Actions Included |
+|------|-------|------------------|
+| Free | $0 | ~170 |
+| Hobby | $29 | ~1,200 |
+| Pro | $149 | ~6,200 |
+| Enterprise | Custom | Unlimited |
+
+Use `max_steps` to limit steps per run and prevent runaway costs.
+
+---
+
+## Limit steps with max_steps
+
+Set `max_steps` to cap the number of actions a task or workflow can take. The run fails with `status: "timed_out"` if it exceeds this limit.
+
+### For tasks
+
+Pass `max_steps` in the request body.
+
+<CodeGroup>
+```python Python
+result = await client.run_task(
+    prompt="Extract the top 3 products",
+    url="https://example.com/products",
+    max_steps=15,
+    wait_for_completion=True,
+)
+print(f"Steps taken: {result.step_count}")
+```
+
+```typescript TypeScript
+const taskRun = await client.runTask({
+  body: {
+    prompt: "Extract the top 3 products",
+    url: "https://example.com/products",
+    max_steps: 15,
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/tasks" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Extract the top 3 products",
+    "url": "https://example.com/products",
+    "max_steps": 15
+  }'
+```
+</CodeGroup>
+
+### For workflows
+
+Pass `max_steps_override` as a parameter (Python) or `x-max-steps-override` header (TypeScript/cURL). This limits total steps across all blocks.
+
+<CodeGroup>
+```python Python
+result = await client.run_workflow(
+    workflow_id="wf_data_extraction",
+    max_steps_override=30,
+    wait_for_completion=True,
+)
+print(f"Steps taken: {result.step_count}")
+```
+
+```typescript TypeScript
+const workflowRun = await client.runWorkflow({
+  "x-max-steps-override": 30,
+  body: {
+    workflow_id: "wf_data_extraction",
+  },
+});
+```
+
+```bash cURL
+curl -X POST "https://api.skyvern.com/v1/run/workflows" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "x-max-steps-override: 30" \
+  -H "Content-Type: application/json" \
+  -d '{"workflow_id": "wf_data_extraction"}'
+```
+</CodeGroup>
+
+<Info>
+If runs consistently time out, increase `max_steps` or simplify the task. If `step_count` is much lower than `max_steps`, reduce the limit.
+</Info>
+
+---
+
+## Optimization tips
+
+**Prompts:**
+- Be specific about the goal and completion criteria
+- Avoid open-ended exploration ("look around", "find interesting data")
+- Use `data_extraction_schema` to constrain what fields the AI extracts
+
+**Navigation:**
+- Provide `url` to start on the correct page instead of searching
+- Use [browser profiles](/optimization/browser-profiles) to skip login steps on repeated runs
+
+**Monitoring:**
+- Check `step_count` in responses to understand actual consumption
+- Use `get_run_timeline()` to identify wasteful steps (loops, unnecessary navigation)
+
+---
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Browser Sessions"
+    icon="browser"
+    href="/optimization/browser-sessions"
+  >
+    Maintain live browser state between calls
+  </Card>
+  <Card
+    title="Browser Profiles"
+    icon="floppy-disk"
+    href="/optimization/browser-profiles"
+  >
+    Save authenticated state for reuse across days
+  </Card>
+</CardGroup>
