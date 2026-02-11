@@ -70,10 +70,10 @@ asyncio.run(main())
 ```
 
 ```typescript TypeScript
-import { SkyvernClient } from "@skyvern/client";
+import { Skyvern } from "skyvern";
 
 async function main() {
-  const client = new SkyvernClient({
+  const client = new Skyvern({
     apiKey: process.env.SKYVERN_API_KEY,
   });
 
@@ -178,39 +178,29 @@ asyncio.run(main())
 ```
 
 ```typescript TypeScript
-import { SkyvernClient } from "@skyvern/client";
-
-async function waitForTask(client: SkyvernClient, runId: string) {
-  while (true) {
-    const run = await client.getRun(runId);
-    if (["completed", "failed", "terminated", "timed_out", "canceled"].includes(run.status)) {
-      return run;
-    }
-    await new Promise((r) => setTimeout(r, 5000));
-  }
-}
+import { Skyvern } from "skyvern";
 
 async function main() {
-  const client = new SkyvernClient({ apiKey: process.env.SKYVERN_API_KEY });
+  const client = new Skyvern({ apiKey: process.env.SKYVERN_API_KEY });
 
   const session = await client.createBrowserSession({ timeout: 30 });
   const sessionId = session.browserSessionId;
 
   try {
-    // Task 1: Login (poll until complete)
-    const loginRun = await client.runTask({
+    // Task 1: Login (wait for completion)
+    await client.runTask({
       prompt: "Login with username 'support@company.com'",
       url: "https://dashboard.example.com/login",
       browserSessionId: sessionId,
+      waitForCompletion: true,
     });
-    await waitForTask(client, loginRun.runId);
 
     // Task 2: Search (reuses login state)
-    const searchRun = await client.runTask({
+    const result = await client.runTask({
       prompt: "Find customer with email 'customer@example.com'",
       browserSessionId: sessionId,
+      waitForCompletion: true,
     });
-    const result = await waitForTask(client, searchRun.runId);
 
     console.log(`Customer: ${JSON.stringify(result.output)}`);
 
@@ -266,39 +256,29 @@ asyncio.run(main())
 ```
 
 ```typescript TypeScript
-import { SkyvernClient } from "@skyvern/client";
-
-async function waitForRun(client: SkyvernClient, runId: string) {
-  while (true) {
-    const run = await client.getRun(runId);
-    if (["completed", "failed", "terminated", "timed_out", "canceled"].includes(run.status)) {
-      return run;
-    }
-    await new Promise((r) => setTimeout(r, 5000));
-  }
-}
+import { Skyvern } from "skyvern";
 
 async function main() {
-  const client = new SkyvernClient({ apiKey: process.env.SKYVERN_API_KEY });
+  const client = new Skyvern({ apiKey: process.env.SKYVERN_API_KEY });
 
   const session = await client.createBrowserSession({ timeout: 60 });
   const sessionId = session.browserSessionId;
 
   try {
     // First, login manually via a task
-    const loginRun = await client.runTask({
+    await client.runTask({
       prompt: "Login with username 'admin@company.com'",
       url: "https://app.example.com/login",
       browserSessionId: sessionId,
+      waitForCompletion: true,
     });
-    await waitForRun(client, loginRun.runId);
 
     // Then run a workflow in the same session (already logged in)
-    const workflowRun = await client.runWorkflow({
+    const result = await client.runWorkflow({
       workflowId: "wf_export_monthly_report",
       browserSessionId: sessionId,
+      waitForCompletion: true,
     });
-    const result = await waitForRun(client, workflowRun.runId);
 
     console.log(`Workflow completed: ${result.status}`);
 

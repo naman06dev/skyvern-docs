@@ -27,6 +27,10 @@ Pass `max_steps` in the request body.
 
 <CodeGroup>
 ```python Python
+from skyvern import Skyvern
+
+client = Skyvern(api_key="YOUR_API_KEY")
+
 result = await client.run_task(
     prompt="Extract the top 3 products",
     url="https://example.com/products",
@@ -37,13 +41,17 @@ print(f"Steps taken: {result.step_count}")
 ```
 
 ```typescript TypeScript
-const taskRun = await client.runTask({
-  body: {
-    prompt: "Extract the top 3 products",
-    url: "https://example.com/products",
-    max_steps: 15,
-  },
+import { Skyvern } from "skyvern";
+
+const client = new Skyvern({ apiKey: process.env.SKYVERN_API_KEY });
+
+const result = await client.runTask({
+  prompt: "Extract the top 3 products",
+  url: "https://example.com/products",
+  maxSteps: 15,
+  waitForCompletion: true,
 });
+console.log(`Steps taken: ${result.stepCount}`);
 ```
 
 ```bash cURL
@@ -64,6 +72,10 @@ Pass `max_steps_override` as a parameter (Python) or `x-max-steps-override` head
 
 <CodeGroup>
 ```python Python
+from skyvern import Skyvern
+
+client = Skyvern(api_key="YOUR_API_KEY")
+
 result = await client.run_workflow(
     workflow_id="wf_data_extraction",
     max_steps_override=30,
@@ -73,12 +85,16 @@ print(f"Steps taken: {result.step_count}")
 ```
 
 ```typescript TypeScript
-const workflowRun = await client.runWorkflow({
-  "x-max-steps-override": 30,
-  body: {
-    workflow_id: "wf_data_extraction",
-  },
+import { Skyvern } from "skyvern";
+
+const client = new Skyvern({ apiKey: process.env.SKYVERN_API_KEY });
+
+const result = await client.runWorkflow({
+  workflowId: "wf_data_extraction",
+  maxStepsOverride: 30,
+  waitForCompletion: true,
 });
+console.log(`Steps taken: ${result.stepCount}`);
 ```
 
 ```bash cURL
