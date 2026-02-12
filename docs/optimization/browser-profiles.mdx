@@ -4,7 +4,7 @@ subtitle: Save and reuse authenticated browser state across runs
 slug: optimization/browser-profiles
 ---
 
-A **Browser Profile** is a saved snapshot of browser state—cookies, localStorage, and session files—that you can reuse across multiple runs. Profiles let you skip login steps and restore authenticated state instantly.
+A **Browser Profile** is a saved snapshot of browser state (cookies, localStorage, and session files) that you can reuse across multiple runs. Profiles let you skip login steps and restore authenticated state instantly.
 
 Profiles are ideal when you:
 - Run the same workflow repeatedly with the same account (daily data extraction, scheduled reports)
@@ -13,20 +13,21 @@ Profiles are ideal when you:
 
 ---
 
+## How profiles work
+
+When a workflow runs with `persist_browser_session=true`, Skyvern archives the browser state (cookies, storage, session files) after the run completes. This archiving happens asynchronously in the background. Once the archive is ready, you can create a profile from it, then pass that profile to future workflow runs to restore the saved state.
+
+---
+
 ## Create a Browser Profile
-
-There are 2 ways to create browser profiles:
-
-1. Run a workflow session with `persist_browser_session=True`
-2. Create a profile from an closed browser session
-
-### Method A: From a workflow run
 
 Create a workflow with `persist_browser_session=true` in the workflow definition, run it, wait for completion, then create a profile from the run. Session archiving happens asynchronously, so add brief retry logic when creating the profile.
 
 <Note>
-`persist_browser_session` must be set when **creating the workflow**, not when running it. It's a workflow definition property, not a runtime parameter.
+`persist_browser_session` must be set when **creating the workflow**, not when running it. It is a workflow definition property, not a runtime parameter.
 </Note>
+
+### From a workflow run
 
 <CodeGroup>
 ```python Python
@@ -55,7 +56,6 @@ async def main():
         }
     )
     print(f"Created workflow: {workflow.workflow_permanent_id}")
-    print(f"persist_browser_session: {workflow.persist_browser_session}")
 
     # Step 2: Run the workflow
     workflow_run = await client.run_workflow(
@@ -85,34 +85,36 @@ asyncio.run(main())
 ```
 
 ```typescript TypeScript
-import { Skyvern } from "skyvern";
+import { Skyvern } from "@skyvern/client";
 
 async function main() {
-  const client = new Skyvern({ apiKey: process.env.SKYVERN_API_KEY });
+  const client = new Skyvern({ apiKey: process.env.SKYVERN_API_KEY! });
 
   // Step 1: Create a workflow with persist_browser_session=true
   const workflow = await client.createWorkflow({
-    jsonDefinition: {
-      title: "Login to Dashboard",
-      persist_browser_session: true,  // Set here in workflow definition
-      workflow_definition: {
-        parameters: [],
-        blocks: [
-          {
-            block_type: "navigation",
-            label: "login",
-            url: "https://dashboard.example.com/login",
-            navigation_goal: "Login with the provided credentials"
-          }
-        ]
+    body: {
+      json_definition: {
+        title: "Login to Dashboard",
+        persist_browser_session: true,  // Set here in workflow definition
+        workflow_definition: {
+          parameters: [],
+          blocks: [
+            {
+              block_type: "navigation",
+              label: "login",
+              url: "https://dashboard.example.com/login",
+              navigation_goal: "Login with the provided credentials"
+            }
+          ]
+        }
       }
     }
   });
-  console.log(`Created workflow: ${workflow.workflowPermanentId}`);
+  console.log(`Created workflow: ${workflow.workflow_permanent_id}`);
 
   // Step 2: Run the workflow and wait for completion
   const workflowRun = await client.runWorkflow({
-    workflowId: workflow.workflowPermanentId,
+    body: { workflow_id: workflow.workflow_permanent_id },
     waitForCompletion: true,
   });
   console.log(`Workflow completed: ${workflowRun.status}`);
@@ -123,7 +125,7 @@ async function main() {
     try {
       profile = await client.createBrowserProfile({
         name: "analytics-dashboard-login",
-        workflowRunId: workflowRun.runId,
+        workflow_run_id: workflowRun.run_id,
         description: "Authenticated state for analytics dashboard",
       });
       break;
@@ -136,7 +138,7 @@ async function main() {
     }
   }
 
-  console.log(`Profile created: ${profile.browserProfileId}`);
+  console.log(`Profile created: ${profile.browser_profile_id}`);
 }
 
 main();
@@ -180,9 +182,7 @@ RUN_ID=$(echo "$RUN_RESPONSE" | jq -r '.run_id')
 while true; do
   STATUS=$(curl -s "https://api.skyvern.com/v1/runs/$RUN_ID" \
     -H "x-api-key: $SKYVERN_API_KEY" | jq -r '.status')
-  if [ "$STATUS" != "created" ] && [ "$STATUS" != "running" ]; then
-    break
-  fi
+  [ "$STATUS" != "created" ] && [ "$STATUS" != "queued" ] && [ "$STATUS" != "running" ] && break
   sleep 5
 done
 
@@ -210,12 +210,16 @@ done
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `name` | string | Required. Display name for the profile. Must be unique within your organization |
-| `workflow_run_id` | string | Required. ID of the completed workflow run (starts with `wr_`) |
+| `workflow_run_id` | string | ID of the completed workflow run to create the profile from |
 | `description` | string | Optional description of the profile's purpose |
 
-### Method B: From a browser session
+### From a browser session
 
-Run tasks in a browser session, close the session, then create a profile from it.
+You can also create a profile from a [Browser Session](/optimization/browser-sessions) that was used inside a workflow with `persist_browser_session=true`. After the workflow run completes and the session is closed, pass the session ID instead of the workflow run ID.
+
+<Warning>
+Only sessions that were part of a workflow with `persist_browser_session=true` produce an archive. A session created with `create_browser_session()` alone does not archive its state. Archiving happens asynchronously after the session closes, so add retry logic.
+</Warning>
 
 <CodeGroup>
 ```python Python
@@ -225,121 +229,82 @@ from skyvern import Skyvern
 async def main():
     client = Skyvern(api_key="YOUR_API_KEY")
 
-    # Step 1: Create a browser session
-    session = await client.create_browser_session(timeout=30)
-    session_id = session.browser_session_id
+    # browser_session_id from a workflow run with persist_browser_session=true
+    session_id = "pbs_your_session_id"
 
-    # Step 2: Run tasks in the session
-    await client.run_task(
-        prompt="Login with username 'admin@company.com'",
-        url="https://dashboard.example.com/login",
-        browser_session_id=session_id,
-        wait_for_completion=True,
-    )
-
-    # Step 3: Close the session
-    await client.close_browser_session(browser_session_id=session_id)
-
-    # Step 4: Create profile from the closed session
-    profile = await client.create_browser_profile(
-        name="dashboard-admin-login",
-        browser_session_id=session_id,
-        description="Admin account for dashboard access",
-    )
-
-    print(f"Profile created: {profile.browser_profile_id}")
+    # Create profile from the closed session (retry while archive uploads)
+    for attempt in range(10):
+        try:
+            profile = await client.create_browser_profile(
+                name="dashboard-admin-login",
+                browser_session_id=session_id,
+                description="Admin account for dashboard access",
+            )
+            print(f"Profile created: {profile.browser_profile_id}")
+            break
+        except Exception as e:
+            if "persisted" in str(e).lower() and attempt < 9:
+                await asyncio.sleep(2)
+                continue
+            raise
 
 asyncio.run(main())
 ```
 
 ```typescript TypeScript
-import { SkyvernClient } from "@skyvern/client";
-
-async function waitForTask(client: SkyvernClient, runId: string) {
-  while (true) {
-    const run = await client.getRun(runId);
-    if (["completed", "failed", "terminated", "timed_out", "canceled"].includes(run.status)) {
-      return run;
-    }
-    await new Promise((r) => setTimeout(r, 5000));
-  }
-}
+import { Skyvern } from "@skyvern/client";
 
 async function main() {
-  const client = new SkyvernClient({ apiKey: process.env.SKYVERN_API_KEY });
+  const client = new Skyvern({ apiKey: process.env.SKYVERN_API_KEY! });
 
-  // Step 1: Create a browser session
-  const session = await client.createBrowserSession({ timeout: 30 });
-  const sessionId = session.browserSessionId;
+  // browser_session_id from a workflow run with persist_browser_session=true
+  const sessionId = "pbs_your_session_id";
 
-  // Step 2: Run tasks in the session
-  const loginRun = await client.runTask({
-    prompt: "Login with username 'admin@company.com'",
-    url: "https://dashboard.example.com/login",
-    browserSessionId: sessionId,
-  });
-  await waitForTask(client, loginRun.runId);
+  // Create profile from the closed session (retry while archive uploads)
+  let profile;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      profile = await client.createBrowserProfile({
+        name: "dashboard-admin-login",
+        browser_session_id: sessionId,
+        description: "Admin account for dashboard access",
+      });
+      break;
+    } catch (e) {
+      if (String(e).toLowerCase().includes("persisted") && attempt < 9) {
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      throw e;
+    }
+  }
 
-  // Step 3: Close the session
-  await client.closeBrowserSession(sessionId);
-
-  // Step 4: Create profile from the closed session
-  const profile = await client.createBrowserProfile({
-    name: "dashboard-admin-login",
-    browserSessionId: sessionId,
-    description: "Admin account for dashboard access",
-  });
-
-  console.log(`Profile created: ${profile.browserProfileId}`);
+  console.log(`Profile created: ${profile.browser_profile_id}`);
 }
 
 main();
 ```
 
 ```bash cURL
-# Step 1: Create a browser session
-SESSION_RESPONSE=$(curl -s -X POST "https://api.skyvern.com/v1/browser_sessions" \
-  -H "x-api-key: $SKYVERN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"timeout": 30}')
+# browser_session_id from a workflow run with persist_browser_session=true
+SESSION_ID="pbs_your_session_id"
 
-SESSION_ID=$(echo "$SESSION_RESPONSE" | jq -r '.browser_session_id')
-
-# Step 2: Run a task in the session
-TASK_RESPONSE=$(curl -s -X POST "https://api.skyvern.com/v1/run/tasks" \
-  -H "x-api-key: $SKYVERN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"prompt\": \"Login with username 'admin@company.com'\",
-    \"url\": \"https://dashboard.example.com/login\",
-    \"browser_session_id\": \"$SESSION_ID\"
-  }")
-
-RUN_ID=$(echo "$TASK_RESPONSE" | jq -r '.run_id')
-
-# Wait for task to complete
-while true; do
-  STATUS=$(curl -s "https://api.skyvern.com/v1/runs/$RUN_ID" \
-    -H "x-api-key: $SKYVERN_API_KEY" | jq -r '.status')
-  if [ "$STATUS" != "created" ] && [ "$STATUS" != "running" ] && [ "$STATUS" != "queued" ]; then
+# Create profile (retry while session archives)
+for i in {1..10}; do
+  PROFILE_RESPONSE=$(curl -s -X POST "https://api.skyvern.com/v1/browser_profiles" \
+    -H "x-api-key: $SKYVERN_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"name\": \"dashboard-admin-login\",
+      \"browser_session_id\": \"$SESSION_ID\",
+      \"description\": \"Admin account for dashboard access\"
+    }")
+  if echo "$PROFILE_RESPONSE" | jq -e '.browser_profile_id' > /dev/null 2>&1; then
+    echo "$PROFILE_RESPONSE"
     break
   fi
-  sleep 5
+  sleep 2
 done
-
-# Step 3: Close the session
-curl -s -X POST "https://api.skyvern.com/v1/browser_sessions/$SESSION_ID/close" \
-  -H "x-api-key: $SKYVERN_API_KEY"
-
-# Step 4: Create profile from the closed session
-curl -X POST "https://api.skyvern.com/v1/browser_profiles" \
-  -H "x-api-key: $SKYVERN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "{
-    \"name\": \"dashboard-admin-login\",
-    \"browser_session_id\": \"$SESSION_ID\",
-    \"description\": \"Admin account for dashboard access\"
-  }"
 ```
 </CodeGroup>
 
@@ -348,16 +313,14 @@ curl -X POST "https://api.skyvern.com/v1/browser_profiles" \
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `name` | string | Required. Display name for the profile. Must be unique within your organization |
-| `browser_session_id` | string | Required. ID of the closed browser session (starts with `pbs_`) |
+| `browser_session_id` | string | ID of the closed browser session (starts with `pbs_`). The session must have been part of a workflow with `persist_browser_session=true` |
 | `description` | string | Optional description of the profile's purpose |
 
 ---
 
 ## Use a Browser Profile
 
-Pass `browser_profile_id` to any workflow or task to restore the saved state. Skyvern restores cookies, localStorage, and session files before the first step runs.
-
-### In workflows
+Pass `browser_profile_id` when running a workflow to restore the saved state. Skyvern restores cookies, localStorage, and session files before the first step runs.
 
 <CodeGroup>
 ```python Python
@@ -367,7 +330,7 @@ from skyvern import Skyvern
 async def main():
     client = Skyvern(api_key="YOUR_API_KEY")
 
-    # Run workflow with saved profile—no login needed
+    # Run workflow with saved profile, no login needed
     result = await client.run_workflow(
         workflow_id="wf_daily_metrics",
         browser_profile_id="bp_490705123456789012",
@@ -380,15 +343,17 @@ asyncio.run(main())
 ```
 
 ```typescript TypeScript
-import { Skyvern } from "skyvern";
+import { Skyvern } from "@skyvern/client";
 
 async function main() {
-  const client = new Skyvern({ apiKey: process.env.SKYVERN_API_KEY });
+  const client = new Skyvern({ apiKey: process.env.SKYVERN_API_KEY! });
 
-  // Run workflow with saved profile—no login needed
+  // Run workflow with saved profile, no login needed
   const result = await client.runWorkflow({
-    workflowId: "wf_daily_metrics",
-    browserProfileId: "bp_490705123456789012",
+    body: {
+      workflow_id: "wf_daily_metrics",
+      browser_profile_id: "bp_490705123456789012",
+    },
     waitForCompletion: true,
   });
 
@@ -423,64 +388,353 @@ curl -X POST "https://api.skyvern.com/v1/run/workflows" \
 }
 ```
 
-### In tasks
+<Note>
+`browser_profile_id` is supported for workflows only. It is not available for standalone tasks via `run_task`. You also cannot use both `browser_profile_id` and `browser_session_id` in the same request.
+</Note>
 
-<CodeGroup>
-```python Python
-import asyncio
-from skyvern import Skyvern
+---
 
-async def main():
-    client = Skyvern(api_key="YOUR_API_KEY")
+## Tutorial: save and reuse browsing state
 
-    # Run task with saved profile—starts already logged in
-    result = await client.run_task(
-        prompt="Download the monthly report from the reports section",
-        url="https://dashboard.example.com",
-        browser_profile_id="bp_490705123456789012",
-        wait_for_completion=True,
-    )
+This walkthrough demonstrates the full profile lifecycle: create a workflow that saves browser state, capture that state as a profile, then reuse it in a second workflow. Each step shows the code and the actual API response.
 
-    print(f"Downloaded files: {result.downloaded_files}")
+<Steps>
+  <Step title="Create a workflow with persist_browser_session">
 
-asyncio.run(main())
-```
+  The workflow must have `persist_browser_session=true` so Skyvern archives the browser state after the run.
 
-```typescript TypeScript
-import { Skyvern } from "skyvern";
+  <CodeGroup>
+  ```python Python
+  workflow = await client.create_workflow(
+      json_definition={
+          "title": "Visit Hacker News",
+          "persist_browser_session": True,
+          "workflow_definition": {
+              "parameters": [],
+              "blocks": [
+                  {
+                      "block_type": "navigation",
+                      "label": "visit_hn",
+                      "url": "https://news.ycombinator.com",
+                      "navigation_goal": "Navigate to the Hacker News homepage and confirm it loaded"
+                  }
+              ]
+          }
+      }
+  )
+  print(workflow.workflow_permanent_id)   # wpid_494674198088536840
+  print(workflow.persist_browser_session) # True
+  ```
 
-async function main() {
-  const client = new Skyvern({ apiKey: process.env.SKYVERN_API_KEY });
+  ```typescript TypeScript
+  const workflow = await client.createWorkflow({
+    body: {
+      json_definition: {
+        title: "Visit Hacker News",
+        persist_browser_session: true,
+        workflow_definition: {
+          parameters: [],
+          blocks: [
+            {
+              block_type: "navigation",
+              label: "visit_hn",
+              url: "https://news.ycombinator.com",
+              navigation_goal: "Navigate to the Hacker News homepage and confirm it loaded"
+            }
+          ]
+        }
+      }
+    }
+  });
+  console.log(workflow.workflow_permanent_id); // wpid_494674198088536840
+  ```
 
-  // Run task with saved profile—starts already logged in
-  const result = await client.runTask({
-    prompt: "Download the monthly report from the reports section",
-    url: "https://dashboard.example.com",
-    browserProfileId: "bp_490705123456789012",
+  ```bash cURL
+  curl -s -X POST "https://api.skyvern.com/v1/workflows" \
+    -H "x-api-key: $SKYVERN_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "json_definition": {
+        "title": "Visit Hacker News",
+        "persist_browser_session": true,
+        "workflow_definition": {
+          "parameters": [],
+          "blocks": [
+            {
+              "block_type": "navigation",
+              "label": "visit_hn",
+              "url": "https://news.ycombinator.com",
+              "navigation_goal": "Navigate to the Hacker News homepage and confirm it loaded"
+            }
+          ]
+        }
+      }
+    }'
+  ```
+  </CodeGroup>
+
+  ```json Response
+  {
+    "workflow_permanent_id": "wpid_494674198088536840",
+    "persist_browser_session": true,
+    "title": "Visit Hacker News"
+  }
+  ```
+
+  </Step>
+
+  <Step title="Run the workflow">
+
+  Run the workflow and wait for it to complete. Skyvern opens a browser, executes the navigation block, then archives the browser state in the background.
+
+  <CodeGroup>
+  ```python Python
+  run = await client.run_workflow(
+      workflow_id=workflow.workflow_permanent_id,
+      wait_for_completion=True,
+  )
+  print(run.run_id) # wr_494674202383504144
+  print(run.status)  # completed
+  ```
+
+  ```typescript TypeScript
+  const run = await client.runWorkflow({
+    body: { workflow_id: workflow.workflow_permanent_id },
     waitForCompletion: true,
   });
+  console.log(run.run_id); // wr_494674202383504144
+  console.log(run.status); // completed
+  ```
 
-  console.log(`Downloaded files: ${JSON.stringify(result.downloadedFiles)}`);
-}
+  ```bash cURL
+  RUN=$(curl -s -X POST "https://api.skyvern.com/v1/run/workflows" \
+    -H "x-api-key: $SKYVERN_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"workflow_id\": \"$WORKFLOW_ID\"}")
+  RUN_ID=$(echo "$RUN" | jq -r '.run_id')
 
-main();
-```
+  # Poll until complete
+  while true; do
+    STATUS=$(curl -s "https://api.skyvern.com/v1/runs/$RUN_ID" \
+      -H "x-api-key: $SKYVERN_API_KEY" | jq -r '.status')
+    [ "$STATUS" != "created" ] && [ "$STATUS" != "queued" ] && [ "$STATUS" != "running" ] && break
+    sleep 5
+  done
+  ```
+  </CodeGroup>
 
-```bash cURL
-curl -X POST "https://api.skyvern.com/v1/run/tasks" \
-  -H "x-api-key: $SKYVERN_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "Download the monthly report from the reports section",
-    "url": "https://dashboard.example.com",
-    "browser_profile_id": "bp_490705123456789012"
-  }'
-```
-</CodeGroup>
+  ```json Response
+  {
+    "run_id": "wr_494674202383504144",
+    "status": "completed"
+  }
+  ```
 
-<Note>
-You cannot use both `browser_profile_id` and `browser_session_id` in the same request. Choose one or the other.
-</Note>
+  </Step>
+
+  <Step title="Create a profile from the completed run">
+
+  Archiving happens asynchronously after the run completes, so add retry logic. In practice the archive is usually ready within a few seconds.
+
+  <CodeGroup>
+  ```python Python
+  for attempt in range(10):
+      try:
+          profile = await client.create_browser_profile(
+              name="hn-browsing-state",
+              workflow_run_id=run.run_id,
+              description="Hacker News cookies and browsing state",
+          )
+          print(profile.browser_profile_id) # bp_494674399951999772
+          break
+      except Exception as e:
+          if "persisted" in str(e).lower() and attempt < 9:
+              await asyncio.sleep(2)
+              continue
+          raise
+  ```
+
+  ```typescript TypeScript
+  let profile;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      profile = await client.createBrowserProfile({
+        name: "hn-browsing-state",
+        workflow_run_id: run.run_id,
+        description: "Hacker News cookies and browsing state",
+      });
+      console.log(profile.browser_profile_id); // bp_494674399951999772
+      break;
+    } catch (e) {
+      if (String(e).toLowerCase().includes("persisted") && attempt < 9) {
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      throw e;
+    }
+  }
+  ```
+
+  ```bash cURL
+  for i in {1..10}; do
+    PROFILE=$(curl -s -X POST "https://api.skyvern.com/v1/browser_profiles" \
+      -H "x-api-key: $SKYVERN_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"name\": \"hn-browsing-state\",
+        \"workflow_run_id\": \"$RUN_ID\",
+        \"description\": \"Hacker News cookies and browsing state\"
+      }")
+    PROFILE_ID=$(echo "$PROFILE" | jq -r '.browser_profile_id // empty')
+    if [ -n "$PROFILE_ID" ]; then
+      echo "$PROFILE" | jq .
+      break
+    fi
+    sleep 2
+  done
+  ```
+  </CodeGroup>
+
+  ```json Response
+  {
+    "browser_profile_id": "bp_494674399951999772",
+    "organization_id": "o_475582633898688888",
+    "name": "hn-browsing-state",
+    "description": "Hacker News cookies and browsing state",
+    "created_at": "2026-02-12T01:09:18.048208",
+    "modified_at": "2026-02-12T01:09:18.048212",
+    "deleted_at": null
+  }
+  ```
+
+  </Step>
+
+  <Step title="Verify the profile exists">
+
+  List all profiles or fetch one by ID to confirm it was saved.
+
+  <CodeGroup>
+  ```python Python
+  # List all profiles
+  profiles = await client.list_browser_profiles()
+  print(len(profiles)) # 1
+
+  # Get a single profile
+  fetched = await client.get_browser_profile(profile_id=profile.browser_profile_id)
+  print(fetched.name) # hn-browsing-state
+  ```
+
+  ```typescript TypeScript
+  // List all profiles
+  const profiles = await client.listBrowserProfiles({});
+  console.log(profiles.length); // 1
+
+  // Get a single profile
+  const fetched = await client.getBrowserProfile(profile.browser_profile_id);
+  console.log(fetched.name); // hn-browsing-state
+  ```
+
+  ```bash cURL
+  # List all profiles
+  curl -s "https://api.skyvern.com/v1/browser_profiles" \
+    -H "x-api-key: $SKYVERN_API_KEY" | jq '.[].name'
+
+  # Get a single profile
+  curl -s "https://api.skyvern.com/v1/browser_profiles/$PROFILE_ID" \
+    -H "x-api-key: $SKYVERN_API_KEY" | jq .
+  ```
+  </CodeGroup>
+
+  ```json List response
+  [
+    {
+      "browser_profile_id": "bp_494674399951999772",
+      "name": "hn-browsing-state",
+      "created_at": "2026-02-12T01:09:18.048208"
+    }
+  ]
+  ```
+
+  </Step>
+
+  <Step title="Reuse the profile in a second workflow">
+
+  Pass `browser_profile_id` when running a workflow. Skyvern restores the saved cookies, localStorage, and session files before the first block runs. The second workflow starts with the browser state from step 2, no repeat navigation needed.
+
+  <CodeGroup>
+  ```python Python
+  result = await client.run_workflow(
+      workflow_id=data_workflow.workflow_permanent_id,
+      browser_profile_id=profile.browser_profile_id,
+      wait_for_completion=True,
+  )
+  print(result.status) # completed
+  ```
+
+  ```typescript TypeScript
+  const result = await client.runWorkflow({
+    body: {
+      workflow_id: dataWorkflow.workflow_permanent_id,
+      browser_profile_id: profile.browser_profile_id,
+    },
+    waitForCompletion: true,
+  });
+  console.log(result.status); // completed
+  ```
+
+  ```bash cURL
+  curl -s -X POST "https://api.skyvern.com/v1/run/workflows" \
+    -H "x-api-key: $SKYVERN_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"workflow_id\": \"$WORKFLOW2_ID\",
+      \"browser_profile_id\": \"$PROFILE_ID\"
+    }"
+  ```
+  </CodeGroup>
+
+  ```json Response
+  {
+    "run_id": "wr_494674434311738148",
+    "status": "created"
+  }
+  ```
+
+  </Step>
+
+  <Step title="Delete the profile">
+
+  Clean up profiles you no longer need.
+
+  <CodeGroup>
+  ```python Python
+  await client.delete_browser_profile(profile_id=profile.browser_profile_id)
+
+  # Confirm deletion
+  remaining = await client.list_browser_profiles()
+  print(len(remaining)) # 0
+  ```
+
+  ```typescript TypeScript
+  await client.deleteBrowserProfile(profile.browser_profile_id);
+
+  // Confirm deletion
+  const remaining = await client.listBrowserProfiles({});
+  console.log(remaining.length); // 0
+  ```
+
+  ```bash cURL
+  curl -s -X DELETE "https://api.skyvern.com/v1/browser_profiles/$PROFILE_ID" \
+    -H "x-api-key: $SKYVERN_API_KEY"
+  ```
+  </CodeGroup>
+
+  </Step>
+</Steps>
+
+<Tip>
+In a real scenario, step 1 would be a login workflow that authenticates with a site. The saved profile then lets all future workflows skip the login step entirely.
+</Tip>
 
 ---
 
@@ -488,26 +742,46 @@ You cannot use both `browser_profile_id` and `browser_session_id` in the same re
 
 ### Use descriptive names
 
-```python
-# Good—identifies account, site, and purpose
+Include the account, site, and purpose in the profile name so it is easy to identify later.
+
+<CodeGroup>
+```python Python
+# Good: identifies account, site, and purpose
 profile = await client.create_browser_profile(
     name="prod-salesforce-admin",
     description="Admin login for daily opportunity sync",
     workflow_run_id=run_id,
 )
 
-# Bad—unclear what this is for
+# Bad: unclear what this is for
 profile = await client.create_browser_profile(
     name="profile1",
     workflow_run_id=run_id,
 )
 ```
 
+```typescript TypeScript
+// Good: identifies account, site, and purpose
+const profile = await client.createBrowserProfile({
+  name: "prod-salesforce-admin",
+  description: "Admin login for daily opportunity sync",
+  workflow_run_id: runId,
+});
+
+// Bad: unclear what this is for
+const badProfile = await client.createBrowserProfile({
+  name: "profile1",
+  workflow_run_id: runId,
+});
+```
+</CodeGroup>
+
 ### Refresh profiles periodically
 
-Session tokens and cookies expire. Re-run your login workflow and create fresh profiles before expiration:
+Session tokens and cookies expire. Re-run your login workflow and create fresh profiles before they go stale. Adding the date to the name makes it easy to track which profile is current.
 
-```python
+<CodeGroup>
+```python Python
 from datetime import date
 
 # Create dated profile after each successful login
@@ -520,11 +794,41 @@ profile = await client.create_browser_profile(
 await client.delete_browser_profile(old_profile_id)
 ```
 
-### Combine with persist_browser_session
+```typescript TypeScript
+// Create dated profile after each successful login
+const profile = await client.createBrowserProfile({
+  name: `crm-login-${new Date().toISOString().split("T")[0]}`,
+  workflow_run_id: newLoginRun.run_id,
+});
 
-To capture state changes during a run (like token refreshes), the workflow must have `persist_browser_session=true` in its definition. This is set when creating the workflow, not at runtime:
+// Delete old profile
+await client.deleteBrowserProfile(oldProfileId);
+```
 
-```python
+```bash cURL
+# Create dated profile after a successful login run
+curl -X POST "https://api.skyvern.com/v1/browser_profiles" \
+  -H "x-api-key: $SKYVERN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"name\": \"crm-login-$(date +%Y-%m-%d)\",
+    \"workflow_run_id\": \"$NEW_RUN_ID\"
+  }"
+
+# Delete old profile
+curl -X DELETE "https://api.skyvern.com/v1/browser_profiles/$OLD_PROFILE_ID" \
+  -H "x-api-key: $SKYVERN_API_KEY"
+```
+</CodeGroup>
+
+### Capture updated state after each run
+
+To capture state changes during a run (like token refreshes), the workflow must have `persist_browser_session=true` in its definition. This lets you create a fresh profile from each completed run.
+
+<CodeGroup>
+```python Python
+from datetime import date
+
 # Step 1: Create workflow with persist_browser_session in the definition
 workflow = await client.create_workflow(
     json_definition={
@@ -551,6 +855,40 @@ if should_refresh_profile:
         workflow_run_id=result.run_id,
     )
 ```
+
+```typescript TypeScript
+// Step 1: Create workflow with persist_browser_session in the definition
+const workflow = await client.createWorkflow({
+  body: {
+    json_definition: {
+      title: "Daily Sync",
+      persist_browser_session: true,  // Set here, not in runWorkflow
+      workflow_definition: {
+        parameters: [],
+        blocks: [/* ... */]
+      }
+    }
+  }
+});
+
+// Step 2: Run with an existing profile
+const result = await client.runWorkflow({
+  body: {
+    workflow_id: workflow.workflow_permanent_id,
+    browser_profile_id: "bp_current",
+  },
+  waitForCompletion: true,
+});
+
+// Step 3: Create updated profile from the completed run
+if (shouldRefreshProfile) {
+  const newProfile = await client.createBrowserProfile({
+    name: `daily-sync-${new Date().toISOString().split("T")[0]}`,
+    workflow_run_id: result.run_id,
+  });
+}
+```
+</CodeGroup>
 
 ---
 
