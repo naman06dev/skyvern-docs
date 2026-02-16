@@ -118,6 +118,17 @@
         ]
       },
       {
+        "tab": "Cookbooks",
+        "groups": [
+          {
+            "group": "Cookbooks",
+            "pages": [
+              "cookbooks/healthcare-portal-data"
+            ]
+          }
+        ]
+      },
+      {
         "tab": "API Reference",
         "openapi": "api-reference/openapi.json"
       }
