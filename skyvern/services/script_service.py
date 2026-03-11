@@ -1,5 +1,7 @@
+import ast
 import asyncio
 import base64
+import copy
 import hashlib
 import importlib.util
 import json
@@ -30,6 +32,12 @@ from skyvern.forge.sdk.models import Step, StepStatus
 from skyvern.forge.sdk.schemas.files import FileInfo
 from skyvern.forge.sdk.schemas.tasks import Task, TaskOutput, TaskStatus
 from skyvern.forge.sdk.schemas.workflow_runs import WorkflowRunBlock
+from skyvern.forge.sdk.workflow.loop_download_filter import (
+    filter_downloaded_files_for_current_iteration as _filter_downloaded_files_for_current_iteration,
+)
+from skyvern.forge.sdk.workflow.loop_download_filter import (
+    to_downloaded_file_signature as _to_downloaded_file_signature,
+)
 from skyvern.forge.sdk.workflow.models.block import (
     ActionBlock,
     CodeBlock,
@@ -49,7 +57,7 @@ from skyvern.forge.sdk.workflow.models.block import (
     ValidationBlock,
 )
 from skyvern.forge.sdk.workflow.models.parameter import PARAMETER_TYPE, OutputParameter, ParameterType
-from skyvern.forge.sdk.workflow.models.workflow import Workflow
+from skyvern.forge.sdk.workflow.models.workflow import Workflow, is_adaptive_caching
 from skyvern.schemas.runs import RunEngine
 from skyvern.schemas.scripts import (
     CreateScriptResponse,
@@ -637,6 +645,10 @@ async def _update_workflow_block(
                     )
             except asyncio.TimeoutError:
                 LOG.warning("Timeout getting downloaded files", task_id=task_id)
+            downloaded_files = _filter_downloaded_files_for_current_iteration(
+                downloaded_files,
+                context.loop_internal_state,
+            )
 
             task_screenshot_artifacts = await app.WORKFLOW_SERVICE.get_recent_task_screenshot_artifacts(
                 organization_id=context.organization_id,
@@ -724,13 +736,27 @@ async def _run_cached_function(cached_fn: Callable) -> Any:
 
 
 def _append_to_loop_output(output: Any, label: str | None = None) -> None:
-    """If executing inside a for_loop, collect this block's output for loop aggregation."""
+    """If executing inside a for_loop, collect this block's output for loop aggregation"""
     context = skyvern_context.current()
     if not context or context.loop_output_values is None or context.loop_metadata is None:
         return
+    # Read the current loop item's raw value from loop metadata
+    loop_value = context.loop_metadata.get("current_value")
+    current_value: Any = loop_value
+    # If the loop value is a dictionary, we'll create a safe copy so we can
+    # enrich it with block output data without mutating the original object
+    if isinstance(loop_value, dict):
+        current_value = copy.deepcopy(loop_value)
+        if isinstance(output, dict):
+            if "downloaded_files" in output:
+                current_value["downloaded_files"] = output.get("downloaded_files")
+            if "extracted_information" in output:
+                current_value["extracted_information"] = output.get("extracted_information")
+
     context.loop_output_values.append(
         {
-            "loop_value": context.loop_metadata.get("current_value"),
+            "loop_value": loop_value,
+            "current_value": current_value,
             "output_value": output,
             "label": label,
         }
@@ -1108,6 +1134,80 @@ async def _fallback_to_ai_run(
                 )
             return
 
+        # Record a fallback episode for adaptive caching (code_v2).
+        # This must happen BEFORE the AI step runs so we capture the page state
+        # at the moment of failure, not after the AI agent has modified the page.
+        # NOTE: This mirrors _record_fallback_episode() in workflow/service.py.
+        # The two implementations should be kept in sync if the episode schema changes.
+        fallback_episode_id: str | None = None
+        form_fields_snapshot: list | None = None
+        if workflow_permanent_id and is_adaptive_caching(workflow, workflow_run):
+            try:
+                # Capture page state at the moment of script failure
+                page_url = None
+                page_text_snapshot = None
+                working_page = None
+                try:
+                    browser_state = await app.BROWSER_MANAGER.get_or_create_for_workflow_run(
+                        workflow_run=workflow_run,
+                    )
+                    working_page = await browser_state.get_working_page()
+                    if working_page:
+                        page_url = working_page.url
+                        page_text_snapshot = (await working_page.inner_text("body", timeout=5000))[:5000]
+                except Exception:
+                    LOG.debug("Failed to capture page state for fallback episode", exc_info=True)
+
+                # Extract structured form field metadata from the DOM
+                try:
+                    if working_page:
+                        form_fields_snapshot = await working_page.evaluate("""() => {
+                            const fields = [];
+                            for (const el of document.querySelectorAll('input, select, textarea')) {
+                                if (el.type === 'hidden') continue;
+                                const labelEl = el.closest('label')
+                                    || (el.id && document.querySelector('label[for="' + el.id + '"]'));
+                                const label = labelEl ? labelEl.textContent.trim().substring(0, 100) : '';
+                                const ariaLabel = el.getAttribute('aria-label') || '';
+                                const placeholder = el.getAttribute('placeholder') || '';
+                                if (!label && !ariaLabel && !placeholder && !el.name) continue;
+                                fields.push({
+                                    tag: el.tagName.toLowerCase(),
+                                    type: el.getAttribute('type') || el.tagName.toLowerCase(),
+                                    label: label,
+                                    name: el.getAttribute('name') || '',
+                                    required: el.required || el.getAttribute('aria-required') === 'true',
+                                    placeholder: placeholder,
+                                });
+                            }
+                            return fields.slice(0, 50);
+                        }""")
+                except Exception:
+                    LOG.debug("Failed to extract form field metadata for fallback episode", exc_info=True)
+
+                # _fallback_to_ai_run is only called for TaskBlock-style blocks (navigation,
+                # extraction, action, login, download), never for ConditionalBlock, so
+                # fallback_type is always "full_block" here.
+                episode = await app.DATABASE.create_fallback_episode(
+                    organization_id=organization_id,
+                    workflow_permanent_id=workflow_permanent_id,
+                    workflow_run_id=workflow_run_id,
+                    block_label=cache_key,
+                    fallback_type="full_block",
+                    script_revision_id=context.script_revision_id,
+                    classify_result=context.last_classify_result,
+                    error_message=str(error)[:2000] if error else None,
+                    page_url=page_url,
+                    page_text_snapshot=page_text_snapshot,
+                )
+                fallback_episode_id = episode.episode_id
+            except Exception:
+                LOG.warning(
+                    "Failed to record fallback episode in _fallback_to_ai_run",
+                    block_label=cache_key,
+                    exc_info=True,
+                )
+
         # 2. create a new step for ai run
         ai_step = await app.DATABASE.create_step(
             task_id=task_id,
@@ -1221,6 +1321,51 @@ async def _fallback_to_ai_run(
         except Exception as e:
             LOG.warning("Failed to regenerate script block after AI fallback", error=str(e), exc_info=True)
             # Don't fail the entire fallback process if script regeneration fails
+
+        # Update fallback episode with AI execution results
+        if fallback_episode_id:
+            try:
+                fallback_succeeded = task.status not in [TaskStatus.terminated, TaskStatus.failed]
+                agent_actions_summary: dict[str, Any] = {
+                    "block_status": str(task.status),
+                }
+                if form_fields_snapshot:
+                    agent_actions_summary["form_fields"] = form_fields_snapshot
+                if not fallback_succeeded and task.failure_reason:
+                    agent_actions_summary["failure_reason"] = str(task.failure_reason)[:2000]
+                # Fetch actions from the AI step.
+                # NOTE: service.py uses _build_action_summary() which includes element
+                # attributes and CSS selectors. We can't import it here (circular import:
+                # service.py imports script_service). Core fields suffice for now.
+                try:
+                    actions = await app.DATABASE.get_task_actions(
+                        task_id=task_id,
+                        organization_id=organization_id,
+                    )
+                    agent_actions_summary["actions"] = [
+                        {
+                            "action_type": a.action_type,
+                            "intention": a.intention,
+                            "reasoning": a.reasoning,
+                            "status": a.status,
+                        }
+                        for a in actions[:20]
+                    ]
+                except Exception:
+                    LOG.debug("Could not fetch actions for fallback episode", exc_info=True)
+
+                await app.DATABASE.update_fallback_episode(
+                    episode_id=fallback_episode_id,
+                    organization_id=organization_id,
+                    agent_actions=agent_actions_summary,
+                    fallback_succeeded=fallback_succeeded,
+                )
+            except Exception:
+                LOG.warning(
+                    "Failed to update fallback episode with agent actions",
+                    episode_id=fallback_episode_id,
+                    exc_info=True,
+                )
     except Exception as e:
         LOG.warning("Failed to fallback to AI run", cache_key=cache_key, exc_info=True)
         # Update block status to failed if workflow block was created
@@ -2199,7 +2344,7 @@ def render_template(template: str, data: dict[str, Any] | None = None) -> str:
 
 def render_list(template: str, data: dict[str, Any] | None = None) -> list[str]:
     rendered_value = render_template(template, data)
-    list_value = eval(rendered_value)
+    list_value = ast.literal_eval(rendered_value)
     if isinstance(list_value, list):
         return list_value
     else:
@@ -2553,8 +2698,9 @@ async def loop(
     workflow_run_id = block_validation_output.workflow_run_id
     organization_id = block_validation_output.organization_id
 
+    workflow_run_context = app.WORKFLOW_CONTEXT_MANAGER.get_workflow_run_context(workflow_run_id)
     if not loop_values:
-        workflow_run_context = app.WORKFLOW_CONTEXT_MANAGER.get_workflow_run_context(workflow_run_id)
+        # step 2. if loop_values is empty, and we have workflow_run_block_id, get loop_values
         if workflow_run_block_id:
             loop_values = await loop_block.get_values_from_loop_variable_reference(
                 workflow_run_context=workflow_run_context,
@@ -2599,14 +2745,41 @@ async def loop(
 
     # step 5. start the loop
     try:
+        # Iterates loop values; captures baseline files; yields items with metadata
         for index, value in enumerate(loop_values):
+            downloaded_file_signatures_before_iteration: list[tuple[str | None, str | None, str | None]] = []
+            baseline_timed_out = False
+            try:
+                async with asyncio.timeout(GET_DOWNLOADED_FILES_TIMEOUT):
+                    downloaded_file_signatures_before_iteration = [
+                        _to_downloaded_file_signature(file_info)
+                        for file_info in await app.STORAGE.get_downloaded_files(
+                            organization_id=organization_id or "",
+                            run_id=workflow_run_id,
+                        )
+                    ]
+            except asyncio.TimeoutError:
+                baseline_timed_out = True
+                LOG.warning(
+                    "Timeout getting baseline downloaded files for loop iteration",
+                    workflow_run_id=workflow_run_id,
+                    loop_index=index,
+                )
+
             # register current_value, current_item and current_index in workflow run context
+            # Block metadata for template context (user-facing fields only)
             loop_metadata = {
                 "current_index": index,
                 "current_value": value,
                 "current_item": value,
             }
             block_validation_output.context.loop_metadata = loop_metadata
+            if baseline_timed_out:
+                block_validation_output.context.loop_internal_state = None
+            else:
+                block_validation_output.context.loop_internal_state = {
+                    "downloaded_file_signatures_before_iteration": downloaded_file_signatures_before_iteration,
+                }
             workflow_run_context.update_block_metadata(block_validation_output.label, loop_metadata)
             # Build the SkyvernLoopItem for this loop
             yield SkyvernLoopItem(index, value)
@@ -2633,4 +2806,5 @@ async def loop(
     finally:
         block_validation_output.context.parent_workflow_run_block_id = None
         block_validation_output.context.loop_metadata = None
+        block_validation_output.context.loop_internal_state = None
         block_validation_output.context.loop_output_values = None

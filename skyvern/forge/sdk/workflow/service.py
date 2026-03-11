@@ -98,6 +98,7 @@ from skyvern.forge.sdk.workflow.models.workflow import (
     WorkflowRunParameter,
     WorkflowRunResponseBase,
     WorkflowRunStatus,
+    is_adaptive_caching,
 )
 from skyvern.forge.sdk.workflow.workflow_definition_converter import convert_workflow_definition
 from skyvern.schemas.runs import (
@@ -672,7 +673,9 @@ class WorkflowService:
                         missing_parameters.append(workflow_parameter.key)
                         continue
                     if workflow_parameter.workflow_parameter_type == WorkflowParameterType.CREDENTIAL_ID:
-                        await self._validate_credential_id(str(request_body_value), organization)
+                        if not isinstance(request_body_value, str):
+                            raise InvalidCredentialId(f"<non-string value of type {type(request_body_value).__name__}>")
+                        await self._validate_credential_id(request_body_value, organization)
                     try:
                         await self.create_workflow_run_parameter(
                             workflow_run_id=workflow_run.workflow_run_id,
@@ -688,7 +691,11 @@ class WorkflowService:
                         ) from parameter_error
                 elif workflow_parameter.default_value is not None:
                     if workflow_parameter.workflow_parameter_type == WorkflowParameterType.CREDENTIAL_ID:
-                        await self._validate_credential_id(str(workflow_parameter.default_value), organization)
+                        if not isinstance(workflow_parameter.default_value, str):
+                            raise InvalidCredentialId(
+                                f"<non-string value of type {type(workflow_parameter.default_value).__name__}>"
+                            )
+                        await self._validate_credential_id(workflow_parameter.default_value, organization)
                     try:
                         await self.create_workflow_run_parameter(
                             workflow_run_id=workflow_run.workflow_run_id,
@@ -982,6 +989,8 @@ class WorkflowService:
             # Check if there's a finally block configured
             finally_block_label = workflow.workflow_definition.finally_block_label
 
+            # Refresh workflow_run from DB to pick up status/failure_reason
+            # set by _execute_workflow_blocks.
             if refreshed_workflow_run := await app.DATABASE.get_workflow_run(
                 workflow_run_id=workflow_run_id,
                 organization_id=organization_id,
@@ -1010,7 +1019,7 @@ class WorkflowService:
             # Trigger AI Script Reviewer for adaptive caching workflows
             # Include terminated and failed runs (triage will filter non-code-fixable failures)
             # Skip canceled (user stopped) and timed_out (infrastructure issue)
-            if workflow.adaptive_caching and pre_finally_status not in (
+            if is_adaptive_caching(workflow, workflow_run) and pre_finally_status not in (
                 WorkflowRunStatus.canceled,
                 WorkflowRunStatus.timed_out,
             ):
@@ -1198,12 +1207,15 @@ class WorkflowService:
                 script_blocks_by_label = {}
                 loaded_script_module = None
 
-        # Mark workflow as running with appropriate engine
-        run_with = "code" if script and is_script_run and script_blocks_by_label else "agent"
-        await self.mark_workflow_run_as_running(workflow_run_id=workflow_run_id, run_with=run_with)
+        # Mark workflow as running, preserving the user's original run_with intent.
+        # The run_with field records what the user requested (e.g. "code_v2"),
+        # not whether a script was actually found. Execution mode is determined
+        # separately by is_script_run and script_mode below.
+        await self.mark_workflow_run_as_running(workflow_run_id=workflow_run_id, run_with=workflow_run.run_with)
 
         # Set script_mode on context so downstream code can skip expensive LLM calls
-        if run_with == "code":
+        # Only enable when we actually have a script to run
+        if script and is_script_run and script_blocks_by_label:
             ctx = skyvern_context.current()
             if ctx:
                 ctx.script_mode = True
@@ -1444,7 +1456,15 @@ class WorkflowService:
         try:
             start_label, label_to_block, default_next_map = self._build_workflow_graph(dag_blocks)
         except InvalidWorkflowDefinition as exc:
-            LOG.error("Workflow graph validation failed", error=str(exc), workflow_id=workflow.workflow_id)
+            LOG.error(
+                "DAG execution failed: workflow graph validation error",
+                workflow_run_id=workflow_run.workflow_run_id,
+                workflow_permanent_id=workflow.workflow_permanent_id,
+                organization_id=organization.organization_id,
+                workflow_id=workflow.workflow_id,
+                error=str(exc),
+                exc_info=True,
+            )
             workflow_run = await self.mark_workflow_run_as_failed(
                 workflow_run_id=workflow_run.workflow_run_id,
                 failure_reason=str(exc),
@@ -1463,8 +1483,10 @@ class WorkflowService:
             block = label_to_block.get(current_label)
             if not block:
                 LOG.error(
-                    "Unable to find block with label in workflow graph",
+                    "DAG execution failed: block label not found in workflow graph",
                     workflow_run_id=workflow_run.workflow_run_id,
+                    workflow_permanent_id=workflow.workflow_permanent_id,
+                    organization_id=organization.organization_id,
                     current_label=current_label,
                 )
                 workflow_run = await self.mark_workflow_run_as_failed(
@@ -1528,6 +1550,14 @@ class WorkflowService:
                 break
 
             if next_label not in label_to_block:
+                LOG.error(
+                    "DAG execution failed: next block label not found in workflow definition",
+                    workflow_run_id=workflow_run.workflow_run_id,
+                    workflow_permanent_id=workflow.workflow_permanent_id,
+                    organization_id=organization.organization_id,
+                    current_block_label=block.label,
+                    missing_block_label=next_label,
+                )
                 workflow_run = await self.mark_workflow_run_as_failed(
                     workflow_run_id=workflow_run.workflow_run_id,
                     failure_reason=f"Next block label {next_label} not found in workflow definition",
@@ -1535,6 +1565,14 @@ class WorkflowService:
                 break
 
             if next_label in visited_labels:
+                LOG.error(
+                    "DAG execution failed: cycle detected during traversal",
+                    workflow_run_id=workflow_run.workflow_run_id,
+                    workflow_permanent_id=workflow.workflow_permanent_id,
+                    organization_id=organization.organization_id,
+                    current_block_label=block.label,
+                    cycle_block_label=next_label,
+                )
                 workflow_run = await self.mark_workflow_run_as_failed(
                     workflow_run_id=workflow_run.workflow_run_id,
                     failure_reason=f"Cycle detected while traversing workflow definition at block {next_label}",
@@ -1800,7 +1838,7 @@ class WorkflowService:
                             workflow_run_block_result = None
 
                             # Record fallback episode for adaptive caching
-                            if workflow.adaptive_caching and block.label:
+                            if is_adaptive_caching(workflow, workflow_run) and block.label:
                                 context = skyvern_context.current()
                                 fallback_episode_id, form_fields_for_episode = await self._record_fallback_episode(
                                     workflow_run=workflow_run,
@@ -1828,7 +1866,7 @@ class WorkflowService:
                     block_executed_with_code = False
 
                     # Record fallback episode for the script reviewer (adaptive caching)
-                    if workflow.adaptive_caching and block.label:
+                    if is_adaptive_caching(workflow, workflow_run) and block.label:
                         context = skyvern_context.current()
                         fallback_episode_id, form_fields_for_episode = await self._record_fallback_episode(
                             workflow_run=workflow_run,
@@ -1850,21 +1888,27 @@ class WorkflowService:
                     and script_blocks_by_label[block.label].requires_agent
                 )
                 # Check if this block has never been cached (e.g. from an unexecuted
-                # conditional branch). Uncached blocks must run via agent to build
-                # initial cache, even when ai_fallback=False.
+                # conditional branch) or is a non-cacheable block type (goto_url,
+                # for_loop, conditional, code, wait, etc.). These blocks must run
+                # via agent even when ai_fallback=False.
                 block_is_uncached = bool(
                     is_script_run
                     and block.label
                     and block.label not in script_blocks_by_label
                     and block.block_type in BLOCK_TYPES_THAT_SHOULD_BE_CACHED
                 )
+                block_is_non_cacheable = bool(
+                    is_script_run and block.block_type not in BLOCK_TYPES_THAT_SHOULD_BE_CACHED
+                )
                 # If ai_fallback is explicitly disabled, skip the agent fallback entirely —
-                # UNLESS this block requires_agent OR has never been cached.
+                # UNLESS this block requires_agent, has never been cached, or is a
+                # non-cacheable block type that must always run via agent.
                 if (
                     is_script_run
                     and workflow_run.ai_fallback is False
                     and not block_requires_agent
                     and not block_is_uncached
+                    and not block_is_non_cacheable
                 ):
                     LOG.info(
                         "ai_fallback disabled: skipping agent fallback, keeping script failure",
@@ -1879,6 +1923,8 @@ class WorkflowService:
                         if block_requires_agent
                         else "uncached_block"
                         if block_is_uncached
+                        else "non_cacheable_block_type"
+                        if block_is_non_cacheable
                         else "normal"
                     )
                     LOG.info(
@@ -1973,7 +2019,7 @@ class WorkflowService:
                     and (block_requires_agent or fallback_episode_id)
                     and workflow_run_block_result.status == BlockStatus.completed
                     and branch_metadata
-                    and workflow.adaptive_caching
+                    and is_adaptive_caching(workflow, workflow_run)
                 ):
                     try:
                         # Extract the branch expressions and results for the reviewer.
@@ -2048,7 +2094,7 @@ class WorkflowService:
                 # should not trigger regeneration — doing so creates an infinite loop
                 # where every run deletes and regenerates the script because blocks
                 # always execute via agent and are never in script_blocks_by_label.
-                and (workflow.adaptive_caching or is_script_run)
+                and (is_adaptive_caching(workflow, workflow_run) or is_script_run)
             ):
                 blocks_to_update.add(block.label)
 
@@ -2489,7 +2535,7 @@ class WorkflowService:
                 extra_http_headers=extra_http_headers,
                 run_with=run_with,
                 cache_key=cache_key,
-                ai_fallback=False if ai_fallback is None else ai_fallback,
+                ai_fallback=True if ai_fallback is None else ai_fallback,
                 run_sequentially=run_sequentially,
                 sequential_key=sequential_key,
                 folder_id=folder_id,
@@ -3741,12 +3787,9 @@ class WorkflowService:
             max_screenshot_scrolls=workflow_run.max_screenshot_scrolls,
             task_v2=task_v2,
             browser_address=workflow_run.browser_address,
+            run_with=workflow_run.run_with,
             script_run=workflow_run.script_run,
             errors=errors,
-            # 2FA verification code waiting state fields
-            waiting_for_verification_code=workflow_run.waiting_for_verification_code,
-            verification_code_identifier=workflow_run.verification_code_identifier,
-            verification_code_polling_started_at=workflow_run.verification_code_polling_started_at,
         )
 
     async def clean_up_workflow(
@@ -4774,7 +4817,14 @@ class WorkflowService:
         workflow: Workflow,
         workflow_run: WorkflowRun,
     ) -> bool:
-        if workflow_run.run_with == "code":
+        """Determine whether this run should attempt to execute cached scripts.
+
+        Note: This intentionally does NOT consult workflow.adaptive_caching.
+        Adaptive caching workflows (is_adaptive_caching=True) gather training
+        data on agent runs before any script exists. The script-recording and
+        fallback-episode logic uses is_adaptive_caching() separately.
+        """
+        if workflow_run.run_with in ("code", "code_v2"):
             return True
         if workflow_run.run_with == "agent":
             return False

@@ -198,25 +198,48 @@ def _serialize_proxy_location(proxy_location: ProxyLocationInput) -> str | None:
     return result
 
 
-DB_CONNECT_ARGS: dict[str, Any] = {}
+def _build_engine(database_string: str) -> Any:
+    """
+    Build a SQLAlchemy async engine.
 
-if "postgresql+psycopg" in settings.DATABASE_STRING:
-    DB_CONNECT_ARGS = {"options": f"-c statement_timeout={settings.DATABASE_STATEMENT_TIMEOUT_MS}"}
-elif "postgresql+asyncpg" in settings.DATABASE_STRING:
-    DB_CONNECT_ARGS = {"server_settings": {"statement_timeout": str(settings.DATABASE_STATEMENT_TIMEOUT_MS)}}
+    When DISABLE_CONNECTION_POOL=True (NullPool): enforce statement_timeout
+    and allow prepared statements.
+
+    When DISABLE_CONNECTION_POOL=False (QueuePool): disable prepared statements
+    and do not set statement_timeout - set at role level in the database,
+    since the transaction pooler does not maintain session-level settings.
+    """
+    connect_args: dict[str, Any] = {}
+    if settings.DISABLE_CONNECTION_POOL:
+        if "postgresql+psycopg" in database_string:
+            connect_args["options"] = f"-c statement_timeout={settings.DATABASE_STATEMENT_TIMEOUT_MS}"
+        if "postgresql+asyncpg" in database_string:
+            connect_args["server_settings"] = {"statement_timeout": str(settings.DATABASE_STATEMENT_TIMEOUT_MS)}
+        return create_async_engine(
+            database_string,
+            json_serializer=_custom_json_serializer,
+            connect_args=connect_args,
+            poolclass=pool.NullPool,
+        )
+
+    else:
+        if "postgresql+psycopg" in database_string:
+            connect_args["prepare_threshold"] = None
+        if "postgresql+asyncpg" in database_string:
+            connect_args["statement_cache_size"] = 0
+        return create_async_engine(
+            database_string,
+            json_serializer=_custom_json_serializer,
+            connect_args=connect_args,
+            pool_pre_ping=True,
+            pool_size=settings.DATABASE_POOL_SIZE,
+            max_overflow=settings.DATABASE_POOL_MAX_OVERFLOW,
+        )
 
 
 class AgentDB(BaseAlchemyDB):
     def __init__(self, database_string: str, debug_enabled: bool = False, db_engine: AsyncEngine | None = None) -> None:
-        super().__init__(
-            db_engine
-            or create_async_engine(
-                database_string,
-                json_serializer=_custom_json_serializer,
-                connect_args=DB_CONNECT_ARGS,
-                poolclass=pool.NullPool if settings.DISABLE_CONNECTION_POOL else None,
-            )
-        )
+        super().__init__(db_engine or _build_engine(database_string))
         self.debug_enabled = debug_enabled
 
     def is_retryable_error(self, error: SQLAlchemyError) -> bool:
@@ -1806,7 +1829,7 @@ class AgentDB(BaseAlchemyDB):
         is_saved_task: bool = False,
         status: WorkflowStatus = WorkflowStatus.published,
         run_with: str | None = None,
-        ai_fallback: bool = False,
+        ai_fallback: bool = True,
         cache_key: str | None = None,
         adaptive_caching: bool = False,
         generate_script_on_terminal: bool = False,
@@ -3199,18 +3222,22 @@ class AgentDB(BaseAlchemyDB):
             LOG.error("SQLAlchemyError", exc_info=True)
             raise
 
-    async def get_last_workflow_run_for_browser_session(
+    async def _get_last_workflow_run_by_filter(
         self,
-        browser_session_id: str,
         organization_id: str | None = None,
+        **filters: str,
     ) -> WorkflowRun | None:
+        """Get the last queued or running workflow run matching the given column filters.
+
+        Used for browser_session_id and browser_address sequential execution.
+        """
         try:
             async with self.Session() as session:
-                # check if there's a queued run
-                query = select(WorkflowRunModel).filter_by(browser_session_id=browser_session_id)
+                query = select(WorkflowRunModel).filter_by(**filters)
                 if organization_id:
                     query = query.filter_by(organization_id=organization_id)
 
+                # check if there's a queued run
                 queue_query = query.filter_by(status=WorkflowRunStatus.queued)
                 queue_query = queue_query.order_by(WorkflowRunModel.modified_at.desc())
                 workflow_run = (await session.scalars(queue_query)).first()
@@ -3228,6 +3255,26 @@ class AgentDB(BaseAlchemyDB):
         except SQLAlchemyError:
             LOG.error("SQLAlchemyError", exc_info=True)
             raise
+
+    async def get_last_workflow_run_for_browser_session(
+        self,
+        browser_session_id: str,
+        organization_id: str | None = None,
+    ) -> WorkflowRun | None:
+        return await self._get_last_workflow_run_by_filter(
+            organization_id=organization_id,
+            browser_session_id=browser_session_id,
+        )
+
+    async def get_last_workflow_run_for_browser_address(
+        self,
+        browser_address: str,
+        organization_id: str | None = None,
+    ) -> WorkflowRun | None:
+        return await self._get_last_workflow_run_by_filter(
+            organization_id=organization_id,
+            browser_address=browser_address,
+        )
 
     async def get_workflows_depending_on(
         self,
@@ -5971,6 +6018,32 @@ class AgentDB(BaseAlchemyDB):
             LOG.error("UnexpectedError", exc_info=True)
             raise
 
+    async def get_script_versions(
+        self,
+        script_id: str,
+        organization_id: str,
+    ) -> list[Script]:
+        """Get all versions of a script, ordered by version DESC."""
+        try:
+            async with self.Session() as session:
+                query = (
+                    select(ScriptModel)
+                    .filter(
+                        ScriptModel.script_id == script_id,
+                        ScriptModel.organization_id == organization_id,
+                        ScriptModel.deleted_at.is_(None),
+                    )
+                    .order_by(ScriptModel.version.desc())
+                )
+                result = await session.scalars(query)
+                return [convert_to_script(row) for row in result.all()]
+        except SQLAlchemyError:
+            LOG.error("SQLAlchemyError", exc_info=True)
+            raise
+        except Exception:
+            LOG.error("UnexpectedError", exc_info=True)
+            raise
+
     async def get_script_revision(self, script_revision_id: str, organization_id: str) -> Script | None:
         async with self.Session() as session:
             script = (
@@ -6604,6 +6677,94 @@ class AgentDB(BaseAlchemyDB):
                     .where(ScriptFallbackEpisodeModel.organization_id == organization_id)
                 )
                 await session.commit()
+        except SQLAlchemyError:
+            LOG.error("SQLAlchemyError", exc_info=True)
+            raise
+
+    async def get_fallback_episodes(
+        self,
+        organization_id: str,
+        workflow_permanent_id: str,
+        page: int = 1,
+        page_size: int = 20,
+        workflow_run_id: str | None = None,
+        block_label: str | None = None,
+        reviewed: bool | None = None,
+        fallback_type: str | None = None,
+    ) -> list[ScriptFallbackEpisode]:
+        try:
+            async with self.Session() as session:
+                query = select(ScriptFallbackEpisodeModel).filter(
+                    ScriptFallbackEpisodeModel.organization_id == organization_id,
+                    ScriptFallbackEpisodeModel.workflow_permanent_id == workflow_permanent_id,
+                )
+                if workflow_run_id is not None:
+                    query = query.filter(ScriptFallbackEpisodeModel.workflow_run_id == workflow_run_id)
+                if block_label is not None:
+                    query = query.filter(ScriptFallbackEpisodeModel.block_label == block_label)
+                if reviewed is not None:
+                    query = query.filter(ScriptFallbackEpisodeModel.reviewed == reviewed)
+                if fallback_type is not None:
+                    query = query.filter(ScriptFallbackEpisodeModel.fallback_type == fallback_type)
+
+                offset = (page - 1) * page_size
+                query = query.order_by(ScriptFallbackEpisodeModel.created_at.desc()).limit(page_size).offset(offset)
+
+                result = await session.scalars(query)
+                return [ScriptFallbackEpisode.model_validate(row) for row in result.all()]
+        except SQLAlchemyError:
+            LOG.error("SQLAlchemyError", exc_info=True)
+            raise
+
+    async def get_fallback_episodes_count(
+        self,
+        organization_id: str,
+        workflow_permanent_id: str,
+        workflow_run_id: str | None = None,
+        block_label: str | None = None,
+        reviewed: bool | None = None,
+        fallback_type: str | None = None,
+    ) -> int:
+        try:
+            async with self.Session() as session:
+                query = (
+                    select(func.count())
+                    .select_from(ScriptFallbackEpisodeModel)
+                    .filter(
+                        ScriptFallbackEpisodeModel.organization_id == organization_id,
+                        ScriptFallbackEpisodeModel.workflow_permanent_id == workflow_permanent_id,
+                    )
+                )
+                if workflow_run_id is not None:
+                    query = query.filter(ScriptFallbackEpisodeModel.workflow_run_id == workflow_run_id)
+                if block_label is not None:
+                    query = query.filter(ScriptFallbackEpisodeModel.block_label == block_label)
+                if reviewed is not None:
+                    query = query.filter(ScriptFallbackEpisodeModel.reviewed == reviewed)
+                if fallback_type is not None:
+                    query = query.filter(ScriptFallbackEpisodeModel.fallback_type == fallback_type)
+
+                result = await session.scalar(query)
+                return result or 0
+        except SQLAlchemyError:
+            LOG.error("SQLAlchemyError", exc_info=True)
+            raise
+
+    async def get_fallback_episode(
+        self,
+        episode_id: str,
+        organization_id: str,
+    ) -> ScriptFallbackEpisode | None:
+        try:
+            async with self.Session() as session:
+                query = select(ScriptFallbackEpisodeModel).filter(
+                    ScriptFallbackEpisodeModel.episode_id == episode_id,
+                    ScriptFallbackEpisodeModel.organization_id == organization_id,
+                )
+                result = await session.scalar(query)
+                if result:
+                    return ScriptFallbackEpisode.model_validate(result)
+                return None
         except SQLAlchemyError:
             LOG.error("SQLAlchemyError", exc_info=True)
             raise

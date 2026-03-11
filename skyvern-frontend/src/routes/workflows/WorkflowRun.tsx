@@ -52,6 +52,8 @@ import { constructCacheKeyValue } from "@/routes/workflows/editor/utils";
 import { useCacheKeyValuesQuery } from "@/routes/workflows/hooks/useCacheKeyValuesQuery";
 import { WorkflowRunStatusAlert } from "@/routes/workflows/workflowRun/WorkflowRunStatusAlert";
 import { WorkflowRunVerificationCodeForm } from "@/routes/workflows/workflowRun/WorkflowRunVerificationCodeForm";
+import { ScriptUpdateCard } from "@/routes/workflows/workflowRun/ScriptUpdateCard";
+import { useFallbackEpisodesQuery } from "@/routes/workflows/hooks/useFallbackEpisodesQuery";
 
 function WorkflowRun() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -108,8 +110,10 @@ function WorkflowRun() {
   });
 
   useEffect(() => {
-    const keys = Object.keys(blockScriptsPublished ?? {});
-    setHasPublishedCode(keys.length > 0);
+    const keys = Object.keys(blockScriptsPublished?.blocks ?? {});
+    setHasPublishedCode(
+      keys.length > 0 || Boolean(blockScriptsPublished?.main_script),
+    );
   }, [blockScriptsPublished, setHasPublishedCode]);
 
   const { data: workflowRunTimeline } = useWorkflowRunTimelineQuery();
@@ -148,6 +152,12 @@ function WorkflowRun() {
     workflowRun && statusIsCancellable(workflowRun);
 
   const workflowRunIsFinalized = workflowRun && statusIsFinalized(workflowRun);
+
+  const { data: fallbackEpisodes } = useFallbackEpisodesQuery({
+    workflowPermanentId,
+    workflowRunId: workflowRun?.workflow_run_id,
+    enabled: workflowRunIsFinalized === true,
+  });
   const finallyBlockLabel =
     workflow?.workflow_definition?.finally_block_label ?? null;
   const selection = findActiveItem(
@@ -510,6 +520,12 @@ function WorkflowRun() {
         </div>
       )}
       {workflowFailureReason}
+      {fallbackEpisodes && fallbackEpisodes.episodes.length > 0 && (
+        <ScriptUpdateCard
+          episodes={fallbackEpisodes.episodes}
+          scriptId={blockScriptsPublished?.script_id}
+        />
+      )}
       {!isEmbedded && (
         <div className="flex items-center justify-between">
           <SwitchBarNavigation options={switchBarOptions} />

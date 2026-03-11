@@ -15,6 +15,7 @@ from sqlalchemy import (
     UnicodeText,
     UniqueConstraint,
     desc,
+    text,
 )
 from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import DeclarativeBase
@@ -205,6 +206,26 @@ class ArtifactModel(Base):
     __table_args__ = (
         Index("org_task_step_index", "organization_id", "task_id", "step_id"),
         Index("artifacts_org_created_at_index", "organization_id", "created_at"),
+        Index(
+            "ix_artifacts_workflow_run_block_id_partial",
+            "workflow_run_block_id",
+            postgresql_where=text("workflow_run_block_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_artifacts_observer_thought_id_partial",
+            "observer_thought_id",
+            postgresql_where=text("observer_thought_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_artifacts_observer_cruise_id_partial",
+            "observer_cruise_id",
+            postgresql_where=text("observer_cruise_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_artifacts_run_id_partial",
+            "run_id",
+            postgresql_where=text("run_id IS NOT NULL"),
+        ),
     )
 
     artifact_id = Column(String, primary_key=True, default=generate_artifact_id)
@@ -281,7 +302,7 @@ class WorkflowModel(Base):
     status = Column(String, nullable=False, default="published")
     generate_script = Column(Boolean, default=False, nullable=False)
     run_with = Column(String, nullable=True)  # 'agent' or 'code'
-    ai_fallback = Column(Boolean, default=False, nullable=False)
+    ai_fallback = Column(Boolean, default=True, nullable=False, server_default=sqlalchemy.true())
     cache_key = Column(String, nullable=True)
     adaptive_caching = Column(Boolean, default=False, nullable=False, server_default=sqlalchemy.false())
     generate_script_on_terminal = Column(Boolean, default=False, nullable=False, server_default=sqlalchemy.false())
@@ -347,7 +368,7 @@ class WorkflowRunModel(Base):
     totp_identifier = Column(String)
     max_screenshot_scrolling_times = Column(Integer, nullable=True)
     extra_http_headers = Column(JSON, nullable=True)
-    browser_address = Column(String, nullable=True)
+    browser_address = Column(String, nullable=True, index=True)
     script_run = Column(JSON, nullable=True)
     job_id = Column(String, nullable=True, index=True)
     depends_on_workflow_run_id = Column(String, nullable=True, index=True)

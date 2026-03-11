@@ -128,6 +128,19 @@ class Script(BaseModel):
     deleted_at: datetime | None = Field(default=None, description="Timestamp when the script was soft deleted")
 
 
+class ScriptVersionSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    version: int
+    script_revision_id: str
+    created_at: datetime
+    run_id: str | None = None
+
+
+class ScriptVersionListResponse(BaseModel):
+    versions: list[ScriptVersionSummary]
+
+
 class ScriptBlock(BaseModel):
     script_block_id: str
     organization_id: str
@@ -155,6 +168,9 @@ class ScriptCacheKeyValuesResponse(BaseModel):
 
 class ScriptBlocksResponse(BaseModel):
     blocks: dict[str, str]
+    main_script: str | None = None
+    script_id: str | None = None
+    version: int | None = None
 
 
 class ScriptBlocksRequest(BaseModel):
@@ -216,6 +232,13 @@ class ScriptFallbackEpisode(BaseModel):
     modified_at: datetime
 
 
+class FallbackEpisodeListResponse(BaseModel):
+    episodes: list[ScriptFallbackEpisode]
+    page: int
+    page_size: int
+    total_count: int
+
+
 class ScriptBranchHit(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -226,3 +249,27 @@ class ScriptBranchHit(BaseModel):
     hit_count: int = 1
     first_hit_at: datetime
     last_hit_at: datetime
+
+
+class ReviewScriptRequest(BaseModel):
+    """Request body for user-initiated script review."""
+
+    user_instructions: str = Field(
+        ...,
+        min_length=1,
+        max_length=5000,
+        description="Instructions for how to fix the script",
+    )
+    workflow_run_id: str | None = Field(
+        None,
+        description="Workflow run ID to pull fallback episodes from (optional)",
+    )
+
+
+class ReviewScriptResponse(BaseModel):
+    """Response from a user-initiated script review."""
+
+    script_id: str
+    version: int
+    updated_blocks: list[str]
+    message: str | None = None

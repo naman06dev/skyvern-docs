@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from skyvern.forge.sdk.forge_log import setup_logger as _setup_logger
 from skyvern.utils.env_paths import resolve_backend_env_path
 
+from ..auth_command import login as login_command
 from ..auth_command import signup as signup_command
 from ..block import block_app
 from ..credential import credential_app
@@ -83,7 +84,8 @@ cli_app.add_typer(
     quickstart_app, name="quickstart", help="One-command setup and start for Skyvern (combines init and run)."
 )
 
-cli_app.command(name="signup")(signup_command)
+cli_app.command(name="login")(login_command)
+cli_app.command(name="signup", hidden=True)(signup_command)  # backwards compat
 
 # Browser automation commands
 cli_app.add_typer(browser_app, name="browser", help="Browser automation commands.")
@@ -95,10 +97,15 @@ cli_app.add_typer(setup_app, name="setup", help="Register Skyvern MCP with AI co
 def init_callback(
     ctx: typer.Context,
     no_postgres: bool = typer.Option(False, "--no-postgres", help="Skip starting PostgreSQL container"),
+    database_string: str = typer.Option(
+        "",
+        "--database-string",
+        help="Custom database connection string (e.g., postgresql+psycopg://user:password@host:port/dbname). When provided, skips Docker PostgreSQL setup.",
+    ),
 ) -> None:
     """Run full initialization when no subcommand is provided."""
     if ctx.invoked_subcommand is None:
-        init_env(no_postgres=no_postgres)
+        init_env(no_postgres=no_postgres, database_string=database_string)
 
 
 @init_app.command(name="browser")
