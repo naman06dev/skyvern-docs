@@ -239,6 +239,7 @@ class ArtifactModel(Base):
     step_id = Column(String, index=True)
     artifact_type = Column(String)
     uri = Column(String)
+    bundle_key = Column(String, nullable=True)
     run_id = Column(String, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
     modified_at = Column(
@@ -975,6 +976,7 @@ class CredentialModel(Base):
     secret_label = Column(String, nullable=True)
     browser_profile_id = Column(String, nullable=True)
     tested_url = Column(String, nullable=True)
+    user_context = Column(String(1000), nullable=True)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
     modified_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow, nullable=False)
@@ -1077,6 +1079,7 @@ class WorkflowScriptModel(Base):
         Index(
             "idx_workflow_scripts_wpid_cache_key_value", "workflow_permanent_id", "cache_key_value", "workflow_run_id"
         ),
+        Index("idx_workflow_scripts_org_script_id", "organization_id", "script_id"),
     )
 
     workflow_script_id = Column(String, primary_key=True, default=generate_workflow_script_id)
@@ -1088,6 +1091,11 @@ class WorkflowScriptModel(Base):
     cache_key = Column(String, nullable=False)  # e.g. "test-{{ website_url }}-cache"
     cache_key_value = Column(String, nullable=False)  # e.g. "test-greenhouse.io/job/1-cache"
     status = Column(String, nullable=True, default="published")
+
+    # Script pinning
+    is_pinned = Column(Boolean, default=False, nullable=False, server_default="false")
+    pinned_at = Column(DateTime, nullable=True)
+    pinned_by = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
     modified_at = Column(

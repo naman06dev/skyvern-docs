@@ -505,6 +505,8 @@ class Block(BaseModel, abc.ABC):
         parent_workflow_run_block_id: str | None = None,
         organization_id: str | None = None,
         browser_session_id: str | None = None,
+        current_value: str | None = None,
+        current_index: int | None = None,
         **kwargs: dict,
     ) -> BlockResult:
         workflow_run_block_id = None
@@ -521,6 +523,8 @@ class Block(BaseModel, abc.ABC):
                 block_type=self.block_type,
                 continue_on_failure=self.continue_on_failure,
                 engine=engine,
+                current_value=current_value,
+                current_index=current_index,
             )
             workflow_run_block_id = workflow_run_block.workflow_run_block_id
 
@@ -1656,7 +1660,9 @@ class ForLoopBlock(Block):
         )
 
     def _build_loop_graph(
-        self, blocks: list[BlockTypeVar]
+        self,
+        blocks: list[BlockTypeVar],
+        skip_sequential_defaulting: bool = False,
     ) -> tuple[str, dict[str, BlockTypeVar], dict[str, str | None]]:
         label_to_block: dict[str, BlockTypeVar] = {}
         default_next_map: dict[str, str | None] = {}
@@ -1667,11 +1673,12 @@ class ForLoopBlock(Block):
             label_to_block[block.label] = block
             default_next_map[block.label] = block.next_block_label
 
-        has_conditional_blocks = any(block.block_type == BlockType.CONDITIONAL for block in blocks)
-        if not has_conditional_blocks:
-            for idx, block in enumerate(blocks[:-1]):
-                if default_next_map.get(block.label) is None:
-                    default_next_map[block.label] = blocks[idx + 1].label
+        if not skip_sequential_defaulting:
+            has_conditional_blocks = any(block.block_type == BlockType.CONDITIONAL for block in blocks)
+            if not has_conditional_blocks:
+                for idx, block in enumerate(blocks[:-1]):
+                    if default_next_map.get(block.label) is None:
+                        default_next_map[block.label] = blocks[idx + 1].label
 
         adjacency: dict[str, set[str]] = {label: set() for label in label_to_block}
         incoming: dict[str, int] = {label: 0 for label in label_to_block}
@@ -1698,10 +1705,18 @@ class ForLoopBlock(Block):
 
         roots = [label for label, count in incoming.items() if count == 0]
         if not roots:
-            raise InvalidWorkflowDefinition(f"No entry block found for loop {self.label}")
+            raise InvalidWorkflowDefinition(
+                f"Circular reference detected inside loop {self.label}: every block is the target of another"
+                " block's next_block_label, so there is no starting block."
+                " At least one block must not be the target of any next_block_label or branch condition."
+            )
         if len(roots) > 1:
             raise InvalidWorkflowDefinition(
-                f"Multiple entry blocks detected in loop {self.label} ({', '.join(sorted(roots))}); only one entry block is supported."
+                f"Disconnected blocks detected inside loop {self.label}: blocks"
+                f" ({', '.join(sorted(roots))}) are not reachable from any other block."
+                " Every block must be reachable from the first block through next_block_label or"
+                " conditional branch references."
+                " Either connect them by setting another block's next_block_label to point to them, or remove them."
             )
 
         queue: deque[str] = deque([roots[0]])
@@ -1716,9 +1731,28 @@ class ForLoopBlock(Block):
                     queue.append(neighbor)
 
         if visited_count != len(label_to_block):
-            raise InvalidWorkflowDefinition(f"Loop {self.label} contains a cycle; DAG traversal is required.")
+            raise InvalidWorkflowDefinition(
+                f"Circular reference detected inside loop {self.label}: some blocks form a loop through their"
+                " next_block_label references, causing an infinite cycle."
+                " Ensure that following next_block_label from any block eventually reaches a block"
+                " with next_block_label set to null."
+            )
 
         return roots[0], label_to_block, default_next_map
+
+    def validate_loop_blocks(self) -> None:
+        """Validate the loop_blocks graph for cycles, orphans, and dangling references.
+
+        Skips sequential defaulting so that disconnected subgraphs are detected.
+        Also recursively validates any nested ForLoopBlock children.
+        Raises InvalidWorkflowDefinition (422) on validation failure.
+        """
+        if not self.loop_blocks:
+            return
+        self._build_loop_graph(self.loop_blocks, skip_sequential_defaulting=True)
+        for block in self.loop_blocks:
+            if isinstance(block, ForLoopBlock):
+                block.validate_loop_blocks()
 
     async def execute_loop_helper(
         self,
@@ -1856,6 +1890,8 @@ class ForLoopBlock(Block):
                     parent_workflow_run_block_id=parent_wrb_id,
                     organization_id=organization_id,
                     browser_session_id=browser_session_id,
+                    current_value=str(loop_over_value),
+                    current_index=loop_idx,
                 )
 
                 # Track conditional workflow_run_block_ids so branch targets
@@ -2371,12 +2407,32 @@ class TextPromptBlock(Block):
     ) -> list[PARAMETER_TYPE]:
         return self.parameters
 
+    def _render_schema_templates(self, obj: Any, workflow_run_context: WorkflowRunContext) -> Any:
+        if isinstance(obj, str):
+            try:
+                return self.format_block_parameter_template_from_workflow_run_context(obj, workflow_run_context)
+            except Exception:
+                LOG.warning(
+                    "Failed to render Jinja template in json_schema value, using original value",
+                    value=obj,
+                    block_label=self.label,
+                    exc_info=True,
+                )
+                return obj
+        elif isinstance(obj, dict):
+            return {k: self._render_schema_templates(v, workflow_run_context) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._render_schema_templates(item, workflow_run_context) for item in obj]
+        return obj
+
     def format_potential_template_parameters(self, workflow_run_context: WorkflowRunContext) -> None:
         if self.llm_key:
             self.llm_key = self.format_block_parameter_template_from_workflow_run_context(
                 self.llm_key, workflow_run_context
             )
         self.prompt = self.format_block_parameter_template_from_workflow_run_context(self.prompt, workflow_run_context)
+        if self.json_schema:
+            self.json_schema = self._render_schema_templates(self.json_schema, workflow_run_context)
 
     async def send_prompt(
         self,
@@ -5713,34 +5769,34 @@ class BranchCondition(BaseModel):
     is_default: bool = False
 
     @model_validator(mode="after")
-    def validate_condition(cls, condition_obj: BranchCondition) -> BranchCondition:
-        if isinstance(condition_obj.criteria, dict):
-            criteria_type = condition_obj.criteria.get("criteria_type")
+    def validate_condition(self) -> BranchCondition:
+        if isinstance(self.criteria, dict):
+            criteria_type = self.criteria.get("criteria_type")
             if criteria_type is None:
                 # Infer criteria type from expression format
-                expression = condition_obj.criteria.get("expression", "")
+                expression = self.criteria.get("expression", "")
                 if _is_pure_jinja_expression(expression):
                     criteria_type = "jinja2_template"
                 else:
                     criteria_type = "prompt"
             if criteria_type == "prompt":
-                condition_obj.criteria = PromptBranchCriteria(**condition_obj.criteria)
+                self.criteria = PromptBranchCriteria(**self.criteria)
             else:
-                condition_obj.criteria = JinjaBranchCriteria(**condition_obj.criteria)
-        if condition_obj.criteria is None and not condition_obj.is_default:
+                self.criteria = JinjaBranchCriteria(**self.criteria)
+        if self.criteria is None and not self.is_default:
             raise ValueError("Branches without criteria must be marked as default.")
-        if condition_obj.criteria is not None and condition_obj.is_default:
+        if self.criteria is not None and self.is_default:
             raise ValueError("Default branches may not define criteria.")
-        if condition_obj.criteria and isinstance(condition_obj.criteria, BranchCriteria):
-            expression = condition_obj.criteria.expression
-            criteria_dict = condition_obj.criteria.model_dump()
+        if self.criteria and isinstance(self.criteria, BranchCriteria):
+            expression = self.criteria.expression
+            criteria_dict = self.criteria.model_dump()
             if _is_pure_jinja_expression(expression):
                 criteria_dict["criteria_type"] = "jinja2_template"
-                condition_obj.criteria = JinjaBranchCriteria(**criteria_dict)
+                self.criteria = JinjaBranchCriteria(**criteria_dict)
             else:
                 criteria_dict["criteria_type"] = "prompt"
-                condition_obj.criteria = PromptBranchCriteria(**criteria_dict)
-        return condition_obj
+                self.criteria = PromptBranchCriteria(**criteria_dict)
+        return self
 
 
 class ConditionalBlock(Block):
@@ -5753,15 +5809,15 @@ class ConditionalBlock(Block):
     branch_conditions: list[BranchCondition] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def validate_branches(cls, block: ConditionalBlock) -> ConditionalBlock:
-        if not block.branch_conditions:
+    def validate_branches(self) -> ConditionalBlock:
+        if not self.branch_conditions:
             raise ValueError("Conditional blocks require at least one branch.")
 
-        default_branches = [branch for branch in block.branch_conditions if branch.is_default]
+        default_branches = [branch for branch in self.branch_conditions if branch.is_default]
         if len(default_branches) > 1:
             raise ValueError("Only one default branch is permitted per conditional block.")
 
-        return block
+        return self
 
     def get_all_parameters(
         self,

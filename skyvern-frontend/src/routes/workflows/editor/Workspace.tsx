@@ -287,6 +287,12 @@ function Workspace({
 
   const handleRequestDeleteNode = useCallback(
     (nodeId: string, nodeLabel: string, confirmCallback: () => void) => {
+      const outputKey = getOutputParameterKey(nodeLabel);
+      const affected = getAffectedBlocks(nodes, outputKey);
+      if (affected.length === 0) {
+        confirmCallback();
+        return;
+      }
       deleteConfirmCallbackRef.current = confirmCallback;
       setDeleteBlockDialogState({
         open: true,
@@ -294,7 +300,7 @@ function Workspace({
         nodeLabel,
       });
     },
-    [],
+    [nodes],
   );
 
   const [cacheKeyValue, setCacheKeyValue] = useState(
@@ -1046,7 +1052,7 @@ function Workspace({
       runWith:
         workflowData.adaptive_caching && workflowData.run_with === "code"
           ? "code_v2"
-          : workflowData.run_with ?? null,
+          : workflowData.run_with ?? "agent",
       scriptCacheKey: workflowData.cache_key ?? null,
       aiFallback: workflowData.ai_fallback ?? true,
       runSequentially: workflowData.run_sequentially ?? false,
@@ -1096,7 +1102,7 @@ function Workspace({
       runWith:
         selectedVersion.adaptive_caching && selectedVersion.run_with === "code"
           ? "code_v2"
-          : selectedVersion.run_with,
+          : selectedVersion.run_with ?? "agent",
       scriptCacheKey: selectedVersion.cache_key,
       aiFallback: selectedVersion.ai_fallback ?? true,
       runSequentially: selectedVersion.run_sequentially ?? false,
@@ -1579,6 +1585,7 @@ function Workspace({
                         }
                         showControlButtons={true}
                         resizeTrigger={windowResizeTrigger}
+                        isExecuting={!!workflowRun && !isFinalized}
                       />
                     </div>
                     <footer className="flex h-[2rem] w-full items-center justify-start gap-4">

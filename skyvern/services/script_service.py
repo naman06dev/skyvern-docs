@@ -9,6 +9,7 @@ import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, AsyncGenerator, Callable, Sequence, cast
 
 import libcst as cst
@@ -17,7 +18,7 @@ from fastapi import BackgroundTasks, HTTPException
 from jinja2.sandbox import SandboxedEnvironment
 
 from skyvern.config import settings
-from skyvern.constants import GET_DOWNLOADED_FILES_TIMEOUT
+from skyvern.constants import GET_DOWNLOADED_FILES_TIMEOUT, SAVE_DOWNLOADED_FILES_TIMEOUT
 from skyvern.core.script_generations.constants import SCRIPT_TASK_BLOCKS
 from skyvern.core.script_generations.generate_script import _build_block_fn, create_or_update_script_block
 from skyvern.core.script_generations.script_skyvern_page import script_run_context_manager
@@ -25,6 +26,7 @@ from skyvern.errors.errors import UserDefinedError
 from skyvern.exceptions import ScriptNotFound, ScriptTerminationException, StepTerminationError, WorkflowRunNotFound
 from skyvern.forge import app
 from skyvern.forge.prompts import prompt_engine
+from skyvern.forge.sdk.api.files import get_path_for_workflow_download_directory, list_files_in_directory, rename_file
 from skyvern.forge.sdk.artifact.models import ArtifactType
 from skyvern.forge.sdk.core import skyvern_context
 from skyvern.forge.sdk.db.enums import TaskType
@@ -429,12 +431,21 @@ async def _create_workflow_block_run_and_task(
         workflow_run_context = app.WORKFLOW_CONTEXT_MANAGER.get_workflow_run_context(workflow_run_id)
         workflow_run_context.update_block_metadata(label, context.loop_metadata)
 
+    current_value_str = None
+    current_index_val = None
+    if context.loop_metadata:
+        cv = context.loop_metadata.get("current_value")
+        current_value_str = str(cv) if cv is not None else None
+        current_index_val = context.loop_metadata.get("current_index")
+
     workflow_run_block = await app.DATABASE.create_workflow_run_block(
         workflow_run_id=workflow_run_id,
         parent_workflow_run_block_id=context.parent_workflow_run_block_id,
         organization_id=organization_id,
         block_type=block_type,
         label=label,
+        current_value=current_value_str,
+        current_index=current_index_val,
     )
 
     workflow_run_block_id = workflow_run_block.workflow_run_block_id
@@ -744,14 +755,15 @@ def _append_to_loop_output(output: Any, label: str | None = None) -> None:
     loop_value = context.loop_metadata.get("current_value")
     current_value: Any = loop_value
     # If the loop value is a dictionary, we'll create a safe copy so we can
-    # enrich it with block output data without mutating the original object
+    # enrich it with block output data without mutating the original object.
+    # Only copy downloaded_files here — extracted_information is already present
+    # in output_value and copying it into current_value causes duplication when
+    # _collect_extracted_information recursively walks both fields.
     if isinstance(loop_value, dict):
         current_value = copy.deepcopy(loop_value)
         if isinstance(output, dict):
             if "downloaded_files" in output:
                 current_value["downloaded_files"] = output.get("downloaded_files")
-            if "extracted_information" in output:
-                current_value["extracted_information"] = output.get("extracted_information")
 
     context.loop_output_values.append(
         {
@@ -1810,7 +1822,126 @@ async def download(
 
         try:
             await _prepare_cached_block_inputs(cache_key, prompt)
+
+            # Count downloaded files before running cached function so we can
+            # verify that the download actually produced a new file.
+            org_id = context.organization_id or ""
+            run_id = context.workflow_run_id or ""
+            files_before: list = []
+            files_before_ok = False
+            try:
+                async with asyncio.timeout(GET_DOWNLOADED_FILES_TIMEOUT):
+                    files_before = await app.STORAGE.get_downloaded_files(
+                        organization_id=org_id,
+                        run_id=run_id,
+                    )
+                files_before_ok = True
+            except asyncio.TimeoutError:
+                LOG.warning(
+                    "Timeout getting downloaded files before cached download",
+                    organization_id=org_id,
+                    workflow_run_id=run_id,
+                )
+
+            # Track local files before download for renaming with download_suffix
+            local_download_dir = get_path_for_workflow_download_directory(run_id)
+            local_files_before = list_files_in_directory(local_download_dir) if local_download_dir.exists() else []
+
             await _run_cached_function(cached_fn)
+
+            # Check local filesystem for newly downloaded files.
+            # This is the primary verification — it doesn't depend on S3/remote
+            # storage and catches the case where download_selector() returned None
+            # causing the click to silently succeed without downloading anything.
+            local_files_after_download = (
+                list_files_in_directory(local_download_dir) if local_download_dir.exists() else []
+            )
+            # Filter out incomplete .crdownload files from both lists for an accurate comparison
+            local_new_files = set(local_files_after_download) - set(local_files_before)
+            local_new_complete_files = [f for f in local_new_files if not f.endswith(".crdownload")]
+            if not local_new_complete_files:
+                raise Exception(
+                    "Cached download block did not produce a new file on the local filesystem. "
+                    f"Local files before: {len(local_files_before)}, after: {len(local_files_after_download)}"
+                )
+
+            # Rename newly downloaded files using download_suffix if provided.
+            # Rename runs BEFORE S3 upload so that remote storage receives the
+            # correctly-named file and subsequent blocks get the right URLs.
+            # This matches the agent path ordering in agent.py.
+            if download_suffix and local_download_dir.exists():
+                local_files_after = list_files_in_directory(local_download_dir)
+                new_files = list(set(local_files_after) - set(local_files_before))
+                for file_path in new_files:
+                    file_extension = Path(file_path).suffix
+                    # Skip incomplete downloads
+                    if file_extension == ".crdownload":
+                        continue
+                    final_file_name = download_suffix
+                    target_path = local_download_dir / (final_file_name + file_extension)
+                    counter = 1
+                    while target_path.exists():
+                        final_file_name = f"{download_suffix}_{counter}"
+                        target_path = local_download_dir / (final_file_name + file_extension)
+                        counter += 1
+                    rename_file(file_path, final_file_name + file_extension)
+
+            # Upload downloaded files from local filesystem to remote storage
+            # so that get_downloaded_files() can find them for verification.
+            save_ok = False
+            try:
+                async with asyncio.timeout(SAVE_DOWNLOADED_FILES_TIMEOUT):
+                    await app.STORAGE.save_downloaded_files(
+                        organization_id=org_id,
+                        run_id=run_id,
+                    )
+                save_ok = True
+            except asyncio.TimeoutError:
+                LOG.warning(
+                    "Timeout saving downloaded files after cached download, skipping verification",
+                    organization_id=org_id,
+                    workflow_run_id=run_id,
+                )
+            except Exception:
+                LOG.warning(
+                    "Failed to save downloaded files after cached download, skipping verification",
+                    exc_info=True,
+                    organization_id=org_id,
+                    workflow_run_id=run_id,
+                )
+
+            # Verify a new file was actually downloaded.
+            # Retry briefly — file may not be visible in storage immediately after the click.
+            # Skip entirely if save timed out — verification would fail and waste ~6s retrying.
+            files_after: list = []
+            files_after_ok = False
+            if save_ok:
+                for _attempt in range(3):
+                    try:
+                        async with asyncio.timeout(GET_DOWNLOADED_FILES_TIMEOUT):
+                            files_after = await app.STORAGE.get_downloaded_files(
+                                organization_id=org_id,
+                                run_id=run_id,
+                            )
+                        files_after_ok = True
+                    except asyncio.TimeoutError:
+                        LOG.warning(
+                            "Timeout getting downloaded files after cached download",
+                            organization_id=org_id,
+                            workflow_run_id=run_id,
+                        )
+                    if len(files_after) > len(files_before):
+                        break
+                    if _attempt < 2:
+                        await asyncio.sleep(2)
+
+            # Only raise if all storage calls succeeded — if any timed out, skip
+            # the check to avoid spurious AI fallbacks under degraded storage.
+            if files_before_ok and files_after_ok and len(files_after) <= len(files_before):
+                raise Exception(
+                    "Cached download function did not produce a new file. "
+                    f"Files before: {len(files_before)}, after: {len(files_after)}"
+                )
 
             # Update block status to completed if workflow block was created
             if workflow_run_block_id:
@@ -1831,6 +1962,7 @@ async def download(
                 url=url,
                 max_steps=max_steps,
                 complete_on_download=complete_on_download,
+                download_suffix=download_suffix,
                 error=e,
                 workflow_run_block_id=workflow_run_block_id,
                 error_code_mapping=error_code_mapping,
@@ -1852,6 +1984,7 @@ async def download(
             include_action_history_in_verification=True,
             engine=RunEngine.skyvern_v1,
             model=model,
+            download_suffix=download_suffix,
         )
         await file_download_block.execute_safe(
             workflow_run_id=block_validation_output.workflow_run_id,
@@ -1913,6 +2046,7 @@ async def action(
                 prompt=prompt,
                 url=url,
                 max_steps=max_steps,
+                download_suffix=download_suffix,
                 totp_identifier=totp_identifier,
                 totp_url=totp_url,
                 error=e,
@@ -1934,6 +2068,7 @@ async def action(
             totp_identifier=totp_identifier,
             totp_verification_url=totp_url,
             model=model,
+            download_suffix=download_suffix,
         )
         await action_block.execute_safe(
             workflow_run_id=block_validation_output.workflow_run_id,
