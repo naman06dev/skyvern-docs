@@ -418,6 +418,8 @@ class BlockType(StrEnum):
     HUMAN_INTERACTION = "human_interaction"
     PRINT_PAGE = "print_page"
     WORKFLOW_TRIGGER = "workflow_trigger"
+    GOOGLE_SHEETS_READ = "google_sheets_read"
+    GOOGLE_SHEETS_WRITE = "google_sheets_write"
 
 
 class BlockStatus(StrEnum):
@@ -442,6 +444,7 @@ class BlockResult:
 
 
 class FileType(StrEnum):
+    AUTO_DETECT = "auto_detect"
     CSV = "csv"
     EXCEL = "excel"
     PDF = "pdf"
@@ -831,7 +834,7 @@ class FileParserBlockYAML(BlockYAML):
     block_type: Literal[BlockType.FILE_URL_PARSER] = BlockType.FILE_URL_PARSER  # type: ignore
 
     file_url: str
-    file_type: FileType
+    file_type: FileType = FileType.AUTO_DETECT
     json_schema: dict[str, Any] | None = None
 
 
@@ -1028,6 +1031,29 @@ class WorkflowTriggerBlockYAML(BlockYAML):
     parameter_keys: list[str] | None = None
 
 
+class GoogleSheetsReadBlockYAML(BlockYAML):
+    block_type: Literal[BlockType.GOOGLE_SHEETS_READ] = BlockType.GOOGLE_SHEETS_READ  # type: ignore
+    spreadsheet_url: str
+    sheet_name: str | None = None
+    range: str | None = None
+    credential_id: str | None = None
+    has_header_row: bool = True
+    parameter_keys: list[str] | None = None
+
+
+class GoogleSheetsWriteBlockYAML(BlockYAML):
+    block_type: Literal[BlockType.GOOGLE_SHEETS_WRITE] = BlockType.GOOGLE_SHEETS_WRITE  # type: ignore
+    spreadsheet_url: str
+    sheet_name: str | None = None
+    range: str | None = None
+    credential_id: str | None = None
+    write_mode: Literal["append", "update"] = "append"
+    values: str = ""
+    column_mapping: dict[str, str] | None = None
+    create_sheet_if_missing: bool = False
+    parameter_keys: list[str] | None = None
+
+
 PARAMETER_YAML_SUBCLASSES = (
     AWSSecretParameterYAML
     | BitwardenLoginCredentialParameterYAML
@@ -1067,6 +1093,8 @@ BLOCK_YAML_SUBCLASSES = (
     | ConditionalBlockYAML
     | PrintPageBlockYAML
     | WorkflowTriggerBlockYAML
+    | GoogleSheetsReadBlockYAML
+    | GoogleSheetsWriteBlockYAML
 )
 BLOCK_YAML_TYPES = Annotated[BLOCK_YAML_SUBCLASSES, Field(discriminator="block_type")]
 

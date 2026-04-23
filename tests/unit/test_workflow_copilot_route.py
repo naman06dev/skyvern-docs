@@ -179,17 +179,26 @@ def _setup_new_copilot_mocks(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("auto_accept", "workflow_was_persisted", "expect_restore"),
+    ("auto_accept", "workflow_was_persisted", "has_valid_proposal", "expect_restore"),
     [
-        (True, True, False),  # auto_accept True => no restore
-        (False, False, False),  # nothing persisted => nothing to restore
-        (False, True, True),  # mid-stream disconnect with a persisted draft => restore
+        # auto_accept + valid proposal => keep the DB write (frontend applied it)
+        (True, True, True, False),
+        # auto_accept + no proposal (SKY-9143) => restore the unverified mid-turn write
+        (True, True, False, True),
+        # Nothing was persisted => nothing to restore regardless of other flags
+        (False, False, False, False),
+        # Normal mid-stream disconnect with a persisted draft and no proposal => restore
+        (False, True, False, True),
+        # Normal mid-stream disconnect with a persisted draft and a valid proposal =>
+        # still restore, user accepts via the panel to re-apply
+        (False, True, True, True),
     ],
 )
 async def test_flag_on_mid_stream_disconnect_restores_when_persisted_and_not_auto_accept(
     monkeypatch: pytest.MonkeyPatch,
     auto_accept: bool,
     workflow_was_persisted: bool,
+    has_valid_proposal: bool,
     expect_restore: bool,
 ) -> None:
     monkeypatch.setattr(settings, "ENABLE_WORKFLOW_COPILOT_V2", True)
@@ -209,9 +218,12 @@ async def test_flag_on_mid_stream_disconnect_restores_when_persisted_and_not_aut
         description="Original description",
         workflow_definition=None,
     )
+    proposal = MagicMock(spec=["model_dump"]) if has_valid_proposal else None
+    if proposal is not None:
+        proposal.model_dump.return_value = {"workflow_id": "wf-canonical"}
     agent_result = SimpleNamespace(
         user_response="done",
-        updated_workflow=None,
+        updated_workflow=proposal,
         global_llm_context=None,
         workflow_yaml=None,
         workflow_was_persisted=workflow_was_persisted,
@@ -241,6 +253,89 @@ async def test_flag_on_mid_stream_disconnect_restores_when_persisted_and_not_aut
         restore_mock.assert_awaited_once()
     else:
         restore_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("auto_accept", "workflow_was_persisted", "has_valid_proposal", "prior_proposal", "expect_clear_call"),
+    [
+        # SKY-9143: auto_accept=False + gated-out turn (no proposal) + mid-turn
+        # persisted draft => we restore AND clear the stale proposed_workflow
+        # card so reload doesn't resurrect a card the assistant just invalidated.
+        (False, True, False, {"workflow_id": "stale"}, True),
+        # Restore fires but there's nothing stale to clear: skip the no-op DB write.
+        (False, True, False, None, False),
+        # auto_accept=False chat-only turn (no persisted draft, no proposal)
+        # must NOT clear a prior turn's proposed_workflow.
+        (False, False, False, {"workflow_id": "stale"}, False),
+        # auto_accept=False turn with a valid proposal sets the new card (not clear).
+        (False, True, True, {"workflow_id": "stale"}, False),
+        # auto_accept=True never writes proposed_workflow at all.
+        (True, True, False, {"workflow_id": "stale"}, False),
+        (True, True, True, {"workflow_id": "stale"}, False),
+    ],
+)
+async def test_proposed_workflow_cleared_on_restore(
+    monkeypatch: pytest.MonkeyPatch,
+    auto_accept: bool,
+    workflow_was_persisted: bool,
+    has_valid_proposal: bool,
+    prior_proposal: dict | None,
+    expect_clear_call: bool,
+) -> None:
+    monkeypatch.setattr(settings, "ENABLE_WORKFLOW_COPILOT_V2", True)
+
+    captured = _install_fake_create(monkeypatch)
+
+    chat = SimpleNamespace(
+        workflow_copilot_chat_id="chat-1",
+        workflow_permanent_id="wpid-1",
+        organization_id="org-1",
+        proposed_workflow=prior_proposal,
+        auto_accept=auto_accept,
+    )
+    original_workflow = SimpleNamespace(
+        workflow_id="wf-canonical",
+        title="Original",
+        description="Original description",
+        workflow_definition=None,
+    )
+    proposal = MagicMock(spec=["model_dump"]) if has_valid_proposal else None
+    if proposal is not None:
+        proposal.model_dump.return_value = {"workflow_id": "wf-canonical"}
+    agent_result = SimpleNamespace(
+        user_response="done",
+        updated_workflow=proposal,
+        global_llm_context=None,
+        workflow_yaml=None,
+        workflow_was_persisted=workflow_was_persisted,
+        clear_proposed_workflow=False,
+    )
+
+    _setup_new_copilot_mocks(monkeypatch, chat, original_workflow, agent_result)
+
+    request = MagicMock()
+    request.headers = {"x-api-key": "sk-test-key"}
+    organization = SimpleNamespace(organization_id="org-1")
+
+    response = await workflow_copilot_chat_post(request, _make_chat_request(), organization)
+    assert response is captured["sentinel"]
+
+    stream = MagicMock()
+    stream.send = AsyncMock(return_value=True)
+    stream.is_disconnected = AsyncMock(return_value=False)
+
+    handler = captured["handler"]
+    assert callable(handler)
+    await handler(stream)
+
+    update_calls = app.DATABASE.workflow_params.update_workflow_copilot_chat.await_args_list
+    clear_calls = [c for c in update_calls if c.kwargs.get("proposed_workflow") is None]
+
+    if expect_clear_call:
+        assert len(clear_calls) == 1, f"expected a proposed_workflow=None clear, got {update_calls!r}"
+    else:
+        assert not clear_calls, f"did not expect a clear call, got {update_calls!r}"
 
 
 @pytest.mark.asyncio

@@ -6,8 +6,10 @@ import asyncio
 import base64
 import json
 import re
+import time
 from collections import defaultdict
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 
 import structlog
 import yaml
@@ -41,7 +43,8 @@ from skyvern.forge.sdk.workflow.models.parameter import (
     WorkflowParameter,
     WorkflowParameterType,
 )
-from skyvern.forge.sdk.workflow.models.workflow import Workflow, WorkflowRunStatus
+from skyvern.forge.sdk.workflow.models.workflow import Workflow, WorkflowRun, WorkflowRunStatus
+from skyvern.schemas.workflows import BlockType
 from skyvern.webeye.navigation import is_skip_inner_retry_error
 
 LOG = structlog.get_logger()
@@ -55,7 +58,24 @@ _FAILED_BLOCK_STATUSES: frozenset[str] = frozenset(
     }
 )
 _DATA_PRODUCING_BLOCK_TYPES = frozenset({"EXTRACTION", "TEXT_PROMPT"})
-RUN_BLOCKS_DEBUG_TIMEOUT_SECONDS = 180
+
+# Absolute upper bound on a single ``run_blocks`` tool invocation. Exists only
+# as a last-resort trip wire for runaway loops — progressing runs should never
+# approach this. The OpenAI Agents SDK wraps the tool in
+# ``asyncio.wait_for(..., timeout=RUN_BLOCKS_SAFETY_CEILING_SECONDS)``; the
+# inner poll loop leaves a 10 s headroom below this ceiling for orderly
+# cleanup before the SDK cancels.
+RUN_BLOCKS_SAFETY_CEILING_SECONDS = 1200  # 20 min
+
+# Primary exit condition: seconds of no observed progress across the combined
+# run / block / step heartbeat. Sized to accommodate the slowest single LLM
+# round-trip (~30-60 s in practice) with headroom; going tighter risks
+# false-positives on healthy runs.
+RUN_BLOCKS_STAGNATION_WINDOW_SECONDS = 90
+
+# 5 s balances responsiveness (18 samples inside the stagnation window) against
+# DB load (240 polls worst case at the safety ceiling).
+RUN_BLOCKS_POLL_INTERVAL_SECONDS = 5.0
 
 # Detached cleanup tasks held here so the garbage collector does not drop them
 # while they still have work to do, and so the "task exception was never
@@ -112,6 +132,81 @@ def _log_detached_cleanup_failure(task: asyncio.Task) -> None:
     exc = task.exception() if task.done() and not task.cancelled() else None
     if exc is not None:
         LOG.warning("Detached cancel fallback failed", exc_info=exc)
+
+
+async def _safe_read_workflow_run(
+    workflow_run_id: str,
+    organization_id: str,
+    *,
+    context: str,
+) -> WorkflowRun | None:
+    """Read a workflow_runs row, logging-and-returning-None on failure.
+
+    The ``context`` string distinguishes call sites in logs (e.g.
+    ``"pre-cancel"`` vs ``"post-drain"``) so a failure is attributable to
+    the specific phase of the timeout branch it fired from.
+    """
+    try:
+        return await app.DATABASE.workflow_runs.get_workflow_run(
+            workflow_run_id=workflow_run_id,
+            organization_id=organization_id,
+        )
+    except Exception:
+        LOG.warning(
+            "Workflow run re-read failed",
+            workflow_run_id=workflow_run_id,
+            context=context,
+            exc_info=True,
+        )
+        return None
+
+
+def _trusted_post_drain_status(run: WorkflowRun | None) -> str | None:
+    """Return the run's status if it is one we can trust after the cancel
+    helper has run; otherwise ``None``.
+
+    ``canceled`` is deliberately rejected because at post-drain read time we
+    can't tell a legitimate ``canceled`` (written by
+    ``_finalize_workflow_run_status`` when a block/user canceled the run)
+    apart from a synthetic ``canceled`` (written by the cancel helper's
+    fallback). Callers that need to distinguish those cases must read the row
+    BEFORE the cancel helper runs.
+    """
+    if run is None:
+        return None
+    if WorkflowRunStatus(run.status).is_final_excluding_canceled():
+        return run.status
+    return None
+
+
+def _maybe_clear_reconciliation_flag(copilot_ctx: Any, result: Any) -> None:
+    """Clear ``pending_reconciliation_run_id`` iff ``result`` proves the
+    pending run has reached a trustworthy-final status.
+
+    Called from ``get_run_results_tool`` after ``_get_run_results`` returns.
+    Requires (a) a pending run_id on the ctx, (b) a matching resolved run_id
+    in ``result.data`` (so a ``workflow_run_id=None`` call that resolves to
+    a different run does NOT clear), and (c) the resolved ``overall_status``
+    passes ``is_final_excluding_canceled`` (so an ambiguous ``canceled``
+    does NOT clear).
+    """
+    pending_run_id = getattr(copilot_ctx, "pending_reconciliation_run_id", None)
+    if not isinstance(pending_run_id, str) or not pending_run_id:
+        return
+    if not isinstance(result, dict):
+        return
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return
+    resolved_run_id = data.get("workflow_run_id")
+    resolved_status = data.get("overall_status")
+    if (
+        isinstance(resolved_run_id, str)
+        and resolved_run_id == pending_run_id
+        and isinstance(resolved_status, str)
+        and WorkflowRunStatus(resolved_status).is_final_excluding_canceled()
+    ):
+        copilot_ctx.pending_reconciliation_run_id = None
 
 
 # Streak threshold at which the copilot hard-aborts a tool call because the
@@ -240,6 +335,25 @@ def _tool_loop_error(ctx: AgentContext, tool_name: str) -> str | None:
     # to block-running tools so planning/metadata tools (update_workflow,
     # list_credentials, get_run_results) stay unaffected.
     if tool_name in _BLOCK_RUNNING_TOOLS:
+        # Reconciliation guard: the previous block-running tool call exited
+        # without a trustworthy terminal status for its workflow run (the
+        # watchdog's stagnation / ceiling / task_exit_unfinalized paths, or
+        # the SKY-9167 post-drain branch where the row read as ``canceled``,
+        # non-final, or unreadable). Block further block-running calls until
+        # ``get_run_results`` clears the flag — prevents the LLM from
+        # auto-retrying a mutation block whose side effects may already
+        # have landed.
+        pending_run_id = getattr(ctx, "pending_reconciliation_run_id", None)
+        if isinstance(pending_run_id, str) and pending_run_id:
+            return (
+                f"The previous block-running tool call for run {pending_run_id} "
+                f"ended without a trustworthy terminal status. "
+                f'Call `get_run_results(workflow_run_id="{pending_run_id}")` '
+                f"first, report the result to the user, then await user input "
+                f"before running more blocks. This guard prevents duplicate "
+                f"side effects on live sites."
+            )
+
         streak_raw = getattr(ctx, "repeated_action_fingerprint_streak_count", 0)
         streak = streak_raw if isinstance(streak_raw, int) else 0
         if streak >= REPEATED_ACTION_STREAK_ABORT_AT:
@@ -681,6 +795,155 @@ def _seed_for_frontier(
     return labels_to_execute, seed, frontier
 
 
+# Watchdog exit reasons. ``success`` means the run reached a trustworthy
+# terminal status inside the poll loop OR after the post-drain reconcile.
+# The three non-success reasons share the reconcile path but produce distinct
+# error messages: ``stagnation`` is the primary trip (no progress signals
+# for ``RUN_BLOCKS_STAGNATION_WINDOW_SECONDS`` seconds), ``ceiling`` is the
+# last-resort budget-exhausted branch, and ``task_exit_unfinalized`` is the
+# rare race where ``execute_workflow`` naturally exits before writing a
+# terminal row.
+WatchdogExitReason = Literal["success", "stagnation", "ceiling", "task_exit_unfinalized"]
+
+
+# Block types that legitimately execute long silent periods: one DB write on
+# entry, work done without intermediate writes (sleep / LLM call / await human
+# input), one write on finish. The watchdog can't distinguish these from
+# "stuck", so any invocation that includes one disables stagnation for the
+# whole run and relies on the safety ceiling alone.
+_QUIET_BLOCK_TYPES: frozenset[str] = frozenset(
+    {BlockType.WAIT.value, BlockType.TEXT_PROMPT.value, BlockType.HUMAN_INTERACTION.value}
+)
+
+
+def _any_quiet_block_requested(
+    copilot_ctx: CopilotContext,
+    labels: list[str] | None,
+) -> bool:
+    """Return True if any of ``labels`` refers to a block whose type is in
+    ``_QUIET_BLOCK_TYPES``. Reuses ``_blocks_by_label`` on the already-loaded
+    workflow definition — no DB call.
+    """
+    if not labels:
+        return False
+    last_workflow = getattr(copilot_ctx, "last_workflow", None)
+    if last_workflow is None:
+        return False
+    by_label = _blocks_by_label(getattr(last_workflow, "workflow_definition", None))
+    for label in labels:
+        block = by_label.get(label)
+        if block is None:
+            continue
+        block_type = getattr(block, "block_type", None)
+        if block_type is None:
+            continue
+        block_type_str = block_type.value if hasattr(block_type, "value") else str(block_type)
+        if block_type_str in _QUIET_BLOCK_TYPES:
+            return True
+    return False
+
+
+async def _read_progress_sources(
+    ctx: CopilotContext,
+    workflow_run_id: str,
+) -> tuple[WorkflowRun | None, datetime | None, datetime | None]:
+    """Read one ``workflow_runs`` row + the two progress aggregates needed
+    by the watchdog marker. Three cheap indexed queries; no row hydration
+    on the aggregate side. The two repo calls run concurrently — they open
+    separate async sessions and hit different tables.
+    """
+
+    async def _read_timestamps() -> tuple[datetime | None, datetime | None]:
+        try:
+            return await app.DATABASE.tasks.get_workflow_run_progress_timestamps(
+                workflow_run_id=workflow_run_id,
+                organization_id=ctx.organization_id,
+            )
+        except Exception:
+            LOG.warning(
+                "Workflow run progress timestamps read failed",
+                workflow_run_id=workflow_run_id,
+                exc_info=True,
+            )
+            return None, None
+
+    run, (step_ts, block_ts) = await asyncio.gather(
+        _safe_read_workflow_run(workflow_run_id, ctx.organization_id, context="watchdog-poll"),
+        _read_timestamps(),
+    )
+    return run, step_ts, block_ts
+
+
+def _progress_marker(
+    run: WorkflowRun | None,
+    step_ts: datetime | None,
+    block_ts: datetime | None,
+) -> tuple[Any, ...]:
+    """Hashable scalar snapshot. Changes iff any observable progress has
+    occurred at the run, step, or block level since the last poll. Every
+    ``update_step`` fires during action execution (including incremental
+    token/cost accumulators at ``forge/agent.py:1449``), so
+    ``max(step.modified_at)`` is the per-LLM-call heartbeat. Non-task blocks
+    (CODE, TEXT_PROMPT) don't create step rows — ``max(workflow_run_block.modified_at)``
+    covers that case. ``run.modified_at`` and ``run.status`` catch the
+    run-level transitions that happen outside those two tables.
+    """
+    return (
+        run.status if run else None,
+        run.modified_at if run is not None else None,
+        step_ts,
+        block_ts,
+    )
+
+
+async def _watchdog_error_message(
+    exit_reason: WatchdogExitReason,
+    ctx: AgentContext,
+    workflow_run_id: str,
+    run: WorkflowRun | None,
+) -> str:
+    """Build the LLM-facing error string for a non-success watchdog exit.
+
+    Every variant ends with the same reconciliation instruction so the agent
+    has a consistent next step: call ``get_run_results`` with the run_id to
+    resolve the outcome before running more blocks. The ``pending_reconciliation_run_id``
+    guard in ``_tool_loop_error`` enforces that the agent actually does so.
+
+    None of the variants contain "timed out" or retry-inviting phrasing —
+    that's the SKY-9163 regression we're fixing.
+    """
+    if exit_reason == "stagnation":
+        body = (
+            f"The run has not made progress for {RUN_BLOCKS_STAGNATION_WINDOW_SECONDS}s. "
+            f"No step, block, or workflow-run row updates were observed in that window. "
+            f"The page is most likely blocked by a captcha, popup, anti-bot challenge, "
+            f"hidden validation error, or an infinite-retry loop on an action the agent "
+            f"cannot detect is failing."
+        )
+    elif exit_reason == "ceiling":
+        body = (
+            f"The run exceeded the {RUN_BLOCKS_SAFETY_CEILING_SECONDS}s absolute ceiling "
+            f"while still showing progress. The workflow is too long to fit in a single "
+            f"tool invocation — split it into smaller block groups."
+        )
+    else:  # task_exit_unfinalized
+        last_observed = f"last observed status: {run.status}" if run is not None else "workflow run row was unreadable"
+        body = (
+            f"The run ended but did not record a trustworthy terminal status in the "
+            f"cancellation grace window ({last_observed})."
+        )
+
+    message = (
+        f"{body} Run ID: {workflow_run_id}. Outcome is uncertain. "
+        f"Do NOT re-invoke block-running tools in this session without first calling "
+        f"`get_run_results` with this workflow_run_id and reporting the result to the user."
+    )
+    current_url, _ = await _fallback_page_info(ctx)
+    if current_url:
+        message += f" Browser was on: {current_url}"
+    return message
+
+
 async def _run_blocks_and_collect_debug(
     params: dict[str, Any],
     ctx: CopilotContext,
@@ -816,71 +1079,97 @@ async def _run_blocks_and_collect_debug(
         )
     )
 
-    # Internal poll budget strictly below the SDK timeout. The OpenAI Agents
-    # SDK wraps this tool in ``asyncio.wait_for(..., timeout=RUN_BLOCKS_DEBUG_TIMEOUT_SECONDS)``
-    # (see openai-agents-python tool.py:invoke_function_tool). If our poll and
-    # the SDK timeout share the same budget, the SDK wins the race, cancels
-    # the tool coroutine, and our orderly cleanup branch below never runs —
-    # leaving ``run_task`` as an orphan that runs to natural completion.
-    # Leaving 10 s headroom ensures the orderly path fires first in the
-    # normal-slow case; the outer ``except asyncio.CancelledError`` covers
-    # the abnormal case where we get cancelled anyway.
-    max_poll = max(1, RUN_BLOCKS_DEBUG_TIMEOUT_SECONDS - 10)
-    poll_interval = 2.0
-    elapsed = 0.0
-    final_status = None
-    run: Any = None
+    # The OpenAI Agents SDK wraps this tool in
+    # ``asyncio.wait_for(..., timeout=RUN_BLOCKS_SAFETY_CEILING_SECONDS)``, so
+    # the inner budget leaves 10 s of headroom for the cancel-drain and
+    # post-drain reconcile to finish before the SDK's own cancel fires.
+    #
+    # Do NOT short-circuit on client disconnect: the agent loop runs to
+    # completion after the SSE stream is gone so its reply persists
+    # (SKY-8986); aborting mid-block would strand the run without debug
+    # output for the final chat message.
+    initial_run, initial_step_ts, initial_block_ts = await _read_progress_sources(ctx, workflow_run.workflow_run_id)
+    progress_marker = _progress_marker(initial_run, initial_step_ts, initial_block_ts)
+    last_progress_monotonic = time.monotonic()
+    started_monotonic = last_progress_monotonic
+    budget_seconds = max(1, RUN_BLOCKS_SAFETY_CEILING_SECONDS - 10)
+    final_status: str | None = None
+    run: Any = initial_run
+    exit_reason: WatchdogExitReason | None = None
+    # Quiet blocks (WAIT/TEXT_PROMPT/HUMAN_INTERACTION) legitimately have
+    # DB-silent periods; disable stagnation for any invocation that includes
+    # one. Safety ceiling still applies.
+    stagnation_enabled = not _any_quiet_block_requested(ctx, labels_to_execute)
 
     try:
-        while elapsed < max_poll:
-            await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
+        while True:
+            await asyncio.sleep(RUN_BLOCKS_POLL_INTERVAL_SECONDS)
 
-            if run_task.done():
-                run = await app.DATABASE.workflow_runs.get_workflow_run(
-                    workflow_run_id=workflow_run.workflow_run_id,
-                    organization_id=ctx.organization_id,
-                )
-                if run and WorkflowRunStatus(run.status).is_final():
-                    final_status = run.status
-                break
+            run, step_ts, block_ts = await _read_progress_sources(ctx, workflow_run.workflow_run_id)
 
-            # Deliberately do NOT short-circuit on client disconnect here.
-            # The agent loop is allowed to run to completion after the SSE
-            # stream is gone (see SKY-8986) so its reply can be persisted;
-            # aborting an in-flight block execution would leave the
-            # workflow run in a limbo state and the agent would have no
-            # debug output to summarize in the final chat message.
-
-            run = await app.DATABASE.workflow_runs.get_workflow_run(
-                workflow_run_id=workflow_run.workflow_run_id,
-                organization_id=ctx.organization_id,
-            )
             if run and WorkflowRunStatus(run.status).is_final():
                 final_status = run.status
+                exit_reason = "success"
                 break
 
-        if final_status is None:
-            await _cancel_run_task_if_not_final(run_task, workflow_run.workflow_run_id)
-            timeout_msg = (
-                f"Block execution timed out after {max_poll}s. "
-                f"Run ID: {workflow_run.workflow_run_id}. "
-                f"The task was likely stuck repeating failing actions. "
-                f"Consider: simplifying the navigation_goal, using a more specific URL, "
-                f"adding a dismiss-popup step, or concluding the site is not automatable."
+            if run_task.done():
+                # Row not terminal yet — shared reconcile path below flips
+                # most of these back to success after post-drain reread.
+                exit_reason = "task_exit_unfinalized"
+                break
+
+            now = time.monotonic()
+            new_marker = _progress_marker(run, step_ts, block_ts)
+            # A run in ``paused`` status (e.g. HumanInteractionBlock) is a
+            # user-driven wait, not stagnation — never trip.
+            is_paused = run is not None and run.status == WorkflowRunStatus.paused.value
+            stagnation_active = stagnation_enabled and not is_paused
+
+            if new_marker != progress_marker:
+                progress_marker = new_marker
+                last_progress_monotonic = now
+            elif stagnation_active and now - last_progress_monotonic >= RUN_BLOCKS_STAGNATION_WINDOW_SECONDS:
+                exit_reason = "stagnation"
+                break
+
+            if now - started_monotonic >= budget_seconds:
+                exit_reason = "ceiling"
+                break
+
+        if exit_reason is not None and exit_reason != "success":
+            # Pre-cancel read first: a legitimate self-finalize (user/block
+            # cancel, or any terminal the run wrote itself) can land between
+            # the last poll and here, and trusting it avoids the
+            # synthetic-``canceled`` ambiguity that the post-drain reread
+            # has to exclude. Then cancel + reread +
+            # ``_trusted_post_drain_status`` applies SKY-9167's success-race
+            # recovery uniformly to all three non-success exit reasons.
+            pre_cancel_run = await _safe_read_workflow_run(
+                workflow_run.workflow_run_id, ctx.organization_id, context="pre-cancel"
             )
-            if ctx.browser_session_id:
-                try:
-                    browser_state = await app.PERSISTENT_SESSIONS_MANAGER.get_browser_state(
-                        session_id=ctx.browser_session_id,
-                        organization_id=ctx.organization_id,
-                    )
-                    if browser_state:
-                        page = await browser_state.get_or_create_page()
-                        timeout_msg += f" Browser was on: {page.url}"
-                except Exception:
-                    pass
-            return {"ok": False, "error": timeout_msg}
+            if pre_cancel_run is not None and WorkflowRunStatus(pre_cancel_run.status).is_final():
+                final_status = pre_cancel_run.status
+                run = pre_cancel_run
+                exit_reason = "success"
+            else:
+                await _cancel_run_task_if_not_final(run_task, workflow_run.workflow_run_id)
+                run = await _safe_read_workflow_run(
+                    workflow_run.workflow_run_id, ctx.organization_id, context="post-drain"
+                )
+                trusted = _trusted_post_drain_status(run)
+                if trusted is not None:
+                    final_status = trusted
+                    exit_reason = "success"
+
+        if exit_reason != "success":
+            # Turn-scoped reconciliation guard — cleared only by a
+            # ``get_run_results`` call that resolves this run_id to an
+            # ``is_final_excluding_canceled`` status
+            # (``_maybe_clear_reconciliation_flag``).
+            ctx.pending_reconciliation_run_id = workflow_run.workflow_run_id
+            assert exit_reason is not None  # narrows for mypy; outer check excludes "success" but not None
+            error_msg = await _watchdog_error_message(exit_reason, ctx, workflow_run.workflow_run_id, run)
+            return {"ok": False, "error": error_msg}
     except asyncio.CancelledError:
         # The SDK's @function_tool(timeout=...) cancelled us mid-poll. Shield
         # the cleanup so the parent cancellation can't interrupt it mid-await.
@@ -927,6 +1216,9 @@ async def _run_blocks_and_collect_debug(
 
     await _attach_action_traces(blocks, results, ctx.organization_id)
 
+    # final_status is guaranteed set here: every non-success exit returns
+    # above, and the success path always populates final_status.
+    assert final_status is not None
     run_ok = WorkflowRunStatus(final_status) == WorkflowRunStatus.completed
 
     action_trace_summary: list[str] = []
@@ -1339,7 +1631,11 @@ def _build_skyvern_mcp_overlays() -> dict[str, SchemaOverlay]:
             description=(
                 "Type text into an input element. Use a CSS selector, an AI intent "
                 "description, or both to target the field. "
-                "Optionally clear the field first. Use this for form filling."
+                "Optionally clear the field first. Use this for form filling. "
+                "NEVER type inline passwords, API keys, tokens, cookies, TOTP/OTP "
+                "codes, private keys, or other raw credentials/secrets received in "
+                "chat — stop and follow the CREDENTIAL HANDLING refusal rule in the "
+                "system prompt instead."
             ),
             hide_params=frozenset({"session_id", "cdp_url", "delay"}),
             required_overrides=["text"],
@@ -1574,6 +1870,11 @@ async def list_credentials_tool(
 ) -> str:
     """List stored credentials (metadata only — never passwords or secrets).
     Use this to find credential IDs for login blocks.
+
+    Paginated. `page_size` caps at 50. The response includes `has_more`;
+    before concluding no credential exists, keep incrementing `page` until
+    `has_more` is `false` — otherwise you risk telling the user to create
+    a credential they have already stored on a later page.
     """
     copilot_ctx = ctx.context
     loop_error = _tool_loop_error(copilot_ctx, "list_credentials")
@@ -1612,7 +1913,7 @@ def _run_blocks_span_data(
 
 @function_tool(
     name_override="run_blocks_and_collect_debug",
-    timeout=RUN_BLOCKS_DEBUG_TIMEOUT_SECONDS,
+    timeout=RUN_BLOCKS_SAFETY_CEILING_SECONDS,
     strict_mode=False,
 )
 async def run_blocks_tool(
@@ -1627,15 +1928,14 @@ async def run_blocks_tool(
 
     Pass runtime values for workflow parameters via the `parameters` dict —
     keys must match the workflow parameter `key` field. When the user has
-    supplied concrete values in their message (names, emails, IDs), pass them
-    on the first call rather than letting the workflow fall back to
+    supplied concrete non-secret values in their message (names, emails, IDs),
+    pass them on the first call rather than letting the workflow fall back to
     placeholders. For sensitive values (password, secret, token, api_key,
-    credential, totp, otp, one_time_code, private_key, auth), prefer calling
-    list_credentials first; if a stored credential matches, reference its
-    credential_id via a credential parameter. If no matching credential
-    exists and the user supplied an inline value, you may pass it via
-    `parameters` — values under those sensitive key names are redacted from
-    the outbound client stream and the tool-execution trace.
+    credential, totp, otp, one_time_code, private_key, auth) — call
+    `list_credentials` and use a credential parameter whose default_value is
+    the stored `credential_id`. If no stored credential matches, do NOT pass
+    the inline value via `parameters`; stop and follow the CREDENTIAL
+    HANDLING refusal rule in the system prompt.
     """
     copilot_ctx = ctx.context
     loop_error = _tool_loop_error(copilot_ctx, "run_blocks_and_collect_debug")
@@ -1691,13 +1991,15 @@ async def get_run_results_tool(
     if workflow_run_id:
         params["workflow_run_id"] = workflow_run_id
     result = await _get_run_results(params, copilot_ctx)
+    _maybe_clear_reconciliation_flag(copilot_ctx, result)
+
     sanitized = sanitize_tool_result_for_llm("get_run_results", result)
     return json.dumps(sanitized)
 
 
 @function_tool(
     name_override="update_and_run_blocks",
-    timeout=RUN_BLOCKS_DEBUG_TIMEOUT_SECONDS,
+    timeout=RUN_BLOCKS_SAFETY_CEILING_SECONDS,
     strict_mode=False,
 )
 async def update_and_run_blocks_tool(
@@ -1712,15 +2014,14 @@ async def update_and_run_blocks_tool(
 
     Pass runtime values for workflow parameters via the `parameters` dict —
     keys must match the workflow parameter `key` field. When the user has
-    supplied concrete values in their message (names, emails, IDs), pass them
-    on the first call rather than letting the workflow fall back to
+    supplied concrete non-secret values in their message (names, emails, IDs),
+    pass them on the first call rather than letting the workflow fall back to
     placeholders. For sensitive values (password, secret, token, api_key,
-    credential, totp, otp, one_time_code, private_key, auth), prefer calling
-    list_credentials first; if a stored credential matches, reference its
-    credential_id via a credential parameter. If no matching credential
-    exists and the user supplied an inline value, you may pass it via
-    `parameters` — values under those sensitive key names are redacted from
-    the outbound client stream and the tool-execution trace.
+    credential, totp, otp, one_time_code, private_key, auth) — call
+    `list_credentials` and use a credential parameter whose default_value is
+    the stored `credential_id`. If no stored credential matches, do NOT pass
+    the inline value via `parameters`; stop and follow the CREDENTIAL
+    HANDLING refusal rule in the system prompt.
     """
     copilot_ctx = ctx.context
     loop_error = _tool_loop_error(copilot_ctx, "update_and_run_blocks")

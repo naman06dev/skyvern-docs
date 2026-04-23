@@ -915,7 +915,7 @@ class WorkflowService:
 
         return None
 
-    @traced(name="skyvern.workflow.execute")
+    @traced(name="skyvern.workflow.execute", role="wrapper")
     async def execute_workflow(
         self,
         workflow_run_id: str,
@@ -924,6 +924,7 @@ class WorkflowService:
         block_labels: list[str] | None = None,
         block_outputs: dict[str, Any] | None = None,
         browser_session_id: str | None = None,
+        need_call_webhook: bool = True,
     ) -> WorkflowRun:
         """Execute a workflow."""
         organization_id = organization.organization_id
@@ -1014,6 +1015,7 @@ class WorkflowService:
                 api_key=api_key,
                 browser_session_id=browser_session_id,
                 close_browser_on_completion=close_browser_on_completion,
+                need_call_webhook=need_call_webhook,
             )
             return workflow_run
 
@@ -1069,6 +1071,7 @@ class WorkflowService:
                     api_key=api_key,
                     browser_session_id=browser_session_id,
                     close_browser_on_completion=close_browser_on_completion,
+                    need_call_webhook=need_call_webhook,
                 )
                 return workflow_run
             # Start background task to periodically renew the browser session
@@ -1256,6 +1259,7 @@ class WorkflowService:
                 api_key=api_key,
                 browser_session_id=browser_session_id,
                 close_browser_on_completion=close_browser_on_completion,
+                need_call_webhook=need_call_webhook,
             )
 
         return workflow_run
@@ -4011,21 +4015,39 @@ class WorkflowService:
             failure_category=failure_category,
         )
 
-    async def mark_workflow_run_as_canceled(self, workflow_run_id: str, run_with: str | None = None) -> WorkflowRun:
+    async def mark_workflow_run_as_canceled(self, workflow_run_id: str) -> WorkflowRun:
+        """Cancel a workflow run, rejecting the transition if the run has already
+        reached a terminal state.
+
+        Previously this wrote ``canceled`` unconditionally, which let a late
+        cancel call (for example the extraction-block retry path in
+        ``_handle_block_result_status`` racing the run's own finalization) clobber
+        a prior ``completed``/``failed``/``terminated`` status and inflate the
+        cancel rate. SKY-9188.
+        """
         LOG.info(
             f"Marking workflow run {workflow_run_id} as canceled",
             workflow_run_id=workflow_run_id,
             workflow_status="canceled",
         )
 
-        # Add workflow canceled tag to trace
-        otel_trace.get_current_span().set_attribute("task.completion_status", WorkflowRunStatus.canceled)
-
-        return await self._update_workflow_run_status(
+        updated = await self.mark_workflow_run_as_canceled_if_not_final(
             workflow_run_id=workflow_run_id,
-            status=WorkflowRunStatus.canceled,
-            run_with=run_with,
         )
+        if updated is not None:
+            return updated
+
+        current = await app.DATABASE.workflow_runs.get_workflow_run(
+            workflow_run_id=workflow_run_id,
+        )
+        if current is None:
+            raise WorkflowRunNotFound(workflow_run_id)
+        LOG.info(
+            "Rejecting cancel: workflow run already in terminal state",
+            workflow_run_id=workflow_run_id,
+            workflow_run_status=current.status,
+        )
+        return current
 
     async def mark_workflow_run_as_canceled_if_not_final(
         self,
@@ -4050,9 +4072,35 @@ class WorkflowService:
         )
         otel_trace.get_current_span().set_attribute("task.completion_status", WorkflowRunStatus.canceled)
 
-        # Match the side effects of ``_update_workflow_run_status`` on a terminal
-        # transition: clear the per-run extraction cache.
+        # Mirror ``_update_workflow_run_status`` side effects on a terminal transition:
+        # extraction-cache clear, duration-metrics log, and task_runs write-through.
         extraction_cache.clear_workflow_run(workflow_run_id)
+
+        start_time = (
+            updated.started_at.replace(tzinfo=UTC) if updated.started_at else updated.created_at.replace(tzinfo=UTC)
+        )
+        queued_seconds = (start_time - updated.created_at.replace(tzinfo=UTC)).total_seconds()
+        duration_seconds = (datetime.now(UTC) - start_time).total_seconds()
+        LOG.info(
+            "Workflow run duration metrics",
+            workflow_run_id=workflow_run_id,
+            workflow_id=updated.workflow_id,
+            queued_seconds=queued_seconds,
+            duration_seconds=duration_seconds,
+            workflow_run_status=updated.status,
+            organization_id=updated.organization_id,
+            run_with=updated.run_with,
+            ai_fallback=updated.ai_fallback,
+            trigger_type=updated.trigger_type,
+            workflow_schedule_id=updated.workflow_schedule_id,
+        )
+
+        bg = asyncio.create_task(
+            self._sync_task_run_from_workflow_run(updated, workflow_run_id, WorkflowRunStatus.canceled),
+        )
+        self._background_tasks.add(bg)
+        bg.add_done_callback(self._background_tasks.discard)
+
         return updated
 
     async def mark_workflow_run_as_timed_out(
@@ -4526,6 +4574,7 @@ class WorkflowService:
             workflow_run_id=workflow_run_id,
             status=workflow_run.status,
             failure_reason=workflow_run.failure_reason,
+            failure_category=workflow_run.failure_category,
             proxy_location=workflow_run.proxy_location,
             webhook_callback_url=workflow_run.webhook_callback_url,
             webhook_failure_reason=workflow_run.webhook_failure_reason,
