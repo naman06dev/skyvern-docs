@@ -120,7 +120,7 @@ The response includes a `run_id` you'll use to check status and fetch results.
 Since tasks run asynchronously, you have two options:
 
 1. **Polling** — Periodically check the task status (shown below)
-2. **Webhooks** — Get notified when the task completes ([see webhooks guide](/going-to-production/webhooks))
+2. **Webhooks** — Get notified when the task completes ([see webhooks guide](/developers/going-to-production/webhooks))
 
 The code below polls every 5 seconds until the task reaches a terminal state. Once complete, `run.output` contains the extracted data as a dictionary.
 
@@ -393,7 +393,7 @@ If you also selected Claude Code during setup, start your local frontend dev ser
   <Card
     title="Extract Structured Data"
     icon="database"
-    href="/running-automations/extract-structured-data"
+    href="/developers/running-automations/extract-structured-data"
   >
     Define a schema to get typed JSON output from your automations
   </Card>
@@ -407,14 +407,14 @@ If you also selected Claude Code during setup, start your local frontend dev ser
   <Card
     title="Build Workflows"
     icon="diagram-project"
-    href="/multi-step-automations/build-a-workflow"
+    href="/developers/multi-step-automations/build-a-workflow"
   >
     Chain multiple steps together for complex automations
   </Card>
   <Card
     title="Use Webhooks"
     icon="webhook"
-    href="/going-to-production/webhooks"
+    href="/developers/going-to-production/webhooks"
   >
     Get notified when tasks complete instead of polling
   </Card>

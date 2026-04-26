@@ -323,7 +323,7 @@ async def create_credential(
     credentials_store[credential_id] = request.model_dump()
     return CredentialResponse(id=credential_id)
 
-@app.get("/api/v1/credentials/{credential_id}")
+@app.get("/api/v1/developers/credentials/{credential_id}")
 async def get_credential(
     credential_id: str,
     _: None = Depends(verify_token)
@@ -332,7 +332,7 @@ async def get_credential(
         raise HTTPException(404, "Credential not found")
     return credentials_store[credential_id]
 
-@app.delete("/api/v1/credentials/{credential_id}")
+@app.delete("/api/v1/developers/credentials/{credential_id}")
 async def delete_credential(
     credential_id: str,
     _: None = Depends(verify_token)

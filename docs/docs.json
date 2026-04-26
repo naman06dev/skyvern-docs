@@ -71,9 +71,8 @@
             "group": "Getting Started",
             "pages": [
               "cloud/getting-started/overview",
-              "cloud/getting-started/run-your-first-task",
-              "cloud/getting-started/run-a-task",
-              "cloud/getting-started/monitor-a-run"
+              "cloud/getting-started/core-concepts",
+              "cloud/getting-started/run-your-first-task"
             ]
           },
           {
@@ -82,9 +81,21 @@
               "cloud/building-workflows/build-a-workflow",
               "cloud/building-workflows/manage-workflows",
               "cloud/building-workflows/add-parameters",
-              "cloud/building-workflows/configure-blocks",
               "cloud/building-workflows/run-a-workflow",
               "cloud/building-workflows/scheduling"
+            ]
+          },
+          {
+            "group": "Workflow Blocks",
+            "pages": [
+              "cloud/building-workflows/configure-blocks"
+            ]
+          },
+          {
+            "group": "Running Tasks",
+            "pages": [
+              "cloud/getting-started/run-a-task",
+              "cloud/getting-started/monitor-a-run"
             ]
           },
           {
@@ -113,21 +124,22 @@
             ]
           },
           {
+            "group": "Integrations",
+            "pages": [
+              "integrations/zapier",
+              "integrations/make",
+              "integrations/n8n",
+              "integrations/workato",
+              "integrations/mcp"
+            ]
+          },
+          {
             "group": "Account & Settings",
             "pages": [
               "cloud/account-settings/api-keys",
               "cloud/account-settings/billing-usage",
               "cloud/account-settings/organization-settings",
               "cloud/account-settings/profile-settings"
-            ]
-          },
-          {
-            "group": "Integrations",
-            "pages": [
-              "integrations/zapier",
-              "integrations/make",
-              "integrations/n8n",
-              "integrations/workato"
             ]
           }
         ]
@@ -138,45 +150,50 @@
           {
             "group": "Running Automations",
             "pages": [
-              "running-automations/run-a-task",
-              "running-automations/task-parameters",
-              "running-automations/extract-structured-data"
+              "developers/running-automations/run-a-task",
+              "developers/running-automations/task-parameters",
+              "developers/running-automations/extract-structured-data"
             ]
           },
           {
             "group": "Handling Authentication",
             "pages": [
-              "credentials/store-credentials",
-              "credentials/handle-2fa",
-              "credentials/troubleshooting-login"
+              "developers/credentials/store-credentials",
+              "developers/credentials/handle-2fa",
+              "developers/credentials/troubleshooting-login"
             ]
           },
           {
             "group": "Multi-Step Automations",
             "pages": [
-              "multi-step-automations/build-a-workflow",
-              "multi-step-automations/workflow-blocks-reference",
-              "multi-step-automations/file-operations",
-              "multi-step-automations/workflow-parameters",
-              "multi-step-automations/scheduling-workflows"
+              "developers/multi-step-automations/build-a-workflow",
+              "developers/multi-step-automations/file-operations",
+              "developers/multi-step-automations/workflow-parameters",
+              "developers/multi-step-automations/scheduling-workflows"
+            ]
+          },
+          {
+            "group": "Workflow Blocks",
+            "pages": [
+              "developers/multi-step-automations/workflow-blocks-reference"
             ]
           },
           {
             "group": "Optimization",
             "pages": [
-              "optimization/browser-sessions",
-              "optimization/browser-profiles",
-              "optimization/cost-control"
+              "developers/optimization/browser-sessions",
+              "developers/optimization/browser-profiles",
+              "developers/optimization/cost-control"
             ]
           },
           {
             "group": "Going to Production",
             "pages": [
-              "going-to-production/webhooks",
-              "going-to-production/proxy-geolocation",
-              "going-to-production/error-handling",
-              "going-to-production/reliability-tips",
-              "going-to-production/captcha-bot-detection",
+              "developers/going-to-production/webhooks",
+              "developers/going-to-production/proxy-geolocation",
+              "developers/going-to-production/error-handling",
+              "developers/going-to-production/reliability-tips",
+              "developers/going-to-production/captcha-bot-detection",
               "integrations/mcp",
               "integrations/cli"
             ]
@@ -184,22 +201,22 @@
           {
             "group": "Debugging",
             "pages": [
-              "debugging/using-artifacts",
-              "debugging/troubleshooting-guide",
-              "debugging/observability-with-laminar",
-              "debugging/faq"
+              "developers/debugging/using-artifacts",
+              "developers/debugging/troubleshooting-guide",
+              "developers/debugging/observability-with-laminar",
+              "developers/debugging/faq"
             ]
           },
           {
             "group": "Self-Hosted Deployment",
             "pages": [
-              "self-hosted/overview",
-              "self-hosted/docker",
-              "self-hosted/llm-configuration",
-              "self-hosted/browser",
-              "self-hosted/proxy",
-              "self-hosted/kubernetes",
-              "self-hosted/storage",
+              "developers/self-hosted/overview",
+              "developers/self-hosted/docker",
+              "developers/self-hosted/llm-configuration",
+              "developers/self-hosted/browser",
+              "developers/self-hosted/proxy",
+              "developers/self-hosted/kubernetes",
+              "developers/self-hosted/storage",
               "integrations/local-llms"
             ]
           }
@@ -323,39 +340,39 @@
     },
     {
       "source": "/getting-started/prompting-guide",
-      "destination": "/debugging/troubleshooting-guide"
+      "destination": "/developers/debugging/troubleshooting-guide"
     },
     {
       "source": "/running-tasks/run-tasks",
-      "destination": "/running-automations/run-a-task"
+      "destination": "/developers/running-automations/run-a-task"
     },
     {
       "source": "/running-tasks/visualizing-results",
-      "destination": "/debugging/using-artifacts"
+      "destination": "/developers/debugging/using-artifacts"
     },
     {
       "source": "/running-tasks/cancel-runs",
-      "destination": "/running-automations/run-a-task"
+      "destination": "/developers/running-automations/run-a-task"
     },
     {
       "source": "/running-tasks/webhooks-faq",
-      "destination": "/going-to-production/webhooks"
+      "destination": "/developers/going-to-production/webhooks"
     },
     {
       "source": "/running-tasks/connect-local-browser",
-      "destination": "/self-hosted/browser"
+      "destination": "/developers/self-hosted/browser"
     },
     {
       "source": "/running-tasks/proxy-location",
-      "destination": "/going-to-production/proxy-geolocation"
+      "destination": "/developers/going-to-production/proxy-geolocation"
     },
     {
       "source": "/running-tasks/advanced-features",
-      "destination": "/running-automations/task-parameters"
+      "destination": "/developers/running-automations/task-parameters"
     },
     {
       "source": "/running-tasks/api-spec",
-      "destination": "/running-automations/run-a-task"
+      "destination": "/developers/running-automations/run-a-task"
     },
     {
       "source": "/workflows/manage-workflows",
@@ -363,11 +380,11 @@
     },
     {
       "source": "/workflows/workflow-blocks-details",
-      "destination": "/multi-step-automations/workflow-blocks-reference"
+      "destination": "/developers/multi-step-automations/workflow-blocks-reference"
     },
     {
       "source": "/workflows/workflow-parameters",
-      "destination": "/multi-step-automations/workflow-parameters"
+      "destination": "/developers/multi-step-automations/workflow-parameters"
     },
     {
       "source": "/workflows/run-workflows",
@@ -375,7 +392,7 @@
     },
     {
       "source": "/workflows/consistent-workflows",
-      "destination": "/going-to-production/reliability-tips"
+      "destination": "/developers/going-to-production/reliability-tips"
     },
     {
       "source": "/workflows/running-workflows",
@@ -383,23 +400,23 @@
     },
     {
       "source": "/workflows/introduction",
-      "destination": "/multi-step-automations/build-a-workflow"
+      "destination": "/developers/multi-step-automations/build-a-workflow"
     },
     {
       "source": "/workflows/workflow-blocks",
-      "destination": "/multi-step-automations/workflow-blocks-reference"
+      "destination": "/developers/multi-step-automations/workflow-blocks-reference"
     },
     {
       "source": "/workflows/creating-workflows",
-      "destination": "/multi-step-automations/build-a-workflow"
+      "destination": "/developers/multi-step-automations/build-a-workflow"
     },
     {
       "source": "/workflows/getting-workflows",
-      "destination": "/multi-step-automations/build-a-workflow#step-7:-get-results"
+      "destination": "/developers/multi-step-automations/build-a-workflow#step-7:-get-results"
     },
     {
       "source": "/workflows/what-is-a-parameter",
-      "destination": "/multi-step-automations/workflow-parameters"
+      "destination": "/developers/multi-step-automations/workflow-parameters"
     },
     {
       "source": "/credentials/introduction",
@@ -427,15 +444,15 @@
     },
     {
       "source": "/browser-sessions/introduction",
-      "destination": "/optimization/browser-sessions"
+      "destination": "/developers/optimization/browser-sessions"
     },
     {
       "source": "/browser-sessions/browser-profiles",
-      "destination": "/optimization/browser-profiles"
+      "destination": "/developers/optimization/browser-profiles"
     },
     {
       "source": "/observability/overview",
-      "destination": "/debugging/using-artifacts"
+      "destination": "/developers/debugging/using-artifacts"
     },
     {
       "source": "/integrations/make.com",
@@ -592,6 +609,34 @@
     {
       "source": "/api-reference/api-reference/files/upload-file",
       "destination": "/api-reference/files/upload-file"
+    },
+    {
+      "source": "/running-automations/:slug*",
+      "destination": "/developers/running-automations/:slug*"
+    },
+    {
+      "source": "/multi-step-automations/:slug*",
+      "destination": "/developers/multi-step-automations/:slug*"
+    },
+    {
+      "source": "/credentials/:slug*",
+      "destination": "/developers/credentials/:slug*"
+    },
+    {
+      "source": "/optimization/:slug*",
+      "destination": "/developers/optimization/:slug*"
+    },
+    {
+      "source": "/going-to-production/:slug*",
+      "destination": "/developers/going-to-production/:slug*"
+    },
+    {
+      "source": "/debugging/:slug*",
+      "destination": "/developers/debugging/:slug*"
+    },
+    {
+      "source": "/self-hosted/:slug*",
+      "destination": "/developers/self-hosted/:slug*"
     }
   ]
 }
